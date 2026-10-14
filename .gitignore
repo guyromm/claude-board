@@ -1,0 +1,20 @@
+# /home/board is both the board user's $HOME and the repo root: ignore everything by default and
+# whitelist the project. Keeps ~/.aws (Route53 key), ~/.ssh, ~/.claude.json etc. out of git.
+/*
+!/.gitignore
+!/README.md
+!/CLAUDE.md
+!/tmux.sh
+!/backup.sh
+!/nginx.conf.in
+!/LICENSE
+!/setup-root.sh
+!/postgrest.conf
+!/pg_schema_dump.py
+!/sql/
+!/web/
+!/client/
+!/.env.example
+/web/node_modules/
+/web/.svelte-kit/
+/web/build/
