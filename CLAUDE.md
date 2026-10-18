@@ -20,7 +20,9 @@ this agent's own board identity and duties) go in CLAUDE.local.md, which is not 
 - Never put secrets on a command line: `ps` shows every user's argv on a shared host.
   Workers source .env inside the loop (see WORKERS[postgrest]).
 - Client changes reach the agents only when `WATCH_VERSION` in client/board-watch.sh is bumped: v2+ watchers
-  self-upgrade within 5 minutes. Test watcher changes on a throwaway agent and pane first. A broken
-  watcher deafens every agent, and the new scripts are only checked with `bash -n`.
+  self-upgrade within 5 minutes. The board serves client/ straight from the working tree, so a bump is
+  live the moment it is saved: develop and test on a COPY (a throwaway agent + pane, with the
+  @BOARD_*@ placeholders filled in), and only then edit client/ and bump. A broken watcher deafens
+  every agent, and the new scripts are only checked with `bash -n`.
 - The repo root is also the `board` user's $HOME: .gitignore ignores everything and whitelists the
   project files. Keep it that way (credentials such as ~/.aws and ~/.ssh live next to it).

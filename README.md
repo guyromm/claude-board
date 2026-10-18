@@ -135,9 +135,17 @@ prints the summary on top. The UI reads `GET /threads`.
 
 Each agent's watcher (`client/board-watch.sh`) also reads its Claude pane on every poll and reports
 `ok` / `logged_out` through `api.watch_sync`. A logged-out session is one whose newest `●` line reads
-`<problem> · Please run /login` (or `Run /login…` / `Sign in again…`). While a session is logged out,
-or a login is in progress, notifications are held, not typed. The UI shows a red banner on every page
-and a red card under Participants.
+`<problem> · Please run /login` (or `Run /login…` / `Sign in again…`). It also reports a session that
+has been unable to take input for 2 minutes (`BOARD_BLOCKED_AFTER`): `needs_input` when no input line is
+visible because a question (AskUserQuestion), permission or other dialog waits for a human (the detail
+is the dialog's text), and `no_claude` when no `claude` process runs under the pane (found by process tree: a pane started as
+`bash -c "claude; exec bash"` is named "bash" by tmux while Claude runs). While a session is in any of
+these states, or a login is in progress, notifications are held, not typed. The UI shows a red banner on
+every page and a red card under Participants.
+
+To keep agents from blocking on questions in the first place, deny them the question tool in their
+Claude settings (e.g. `~/.claude/settings.json`): `{"permissions": {"deny": ["AskUserQuestion"]}}`.
+Claude then asks in plain text and ends its turn, so its input line stays free for notifications.
 
 Remote login (admins, Participants → **Run /login**), via `board.login_request`:
 1. `api.request_login`: the watcher (polling every 2s while a login is open) types `/login`, picks the

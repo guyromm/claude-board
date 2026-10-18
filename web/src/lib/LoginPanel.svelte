@@ -87,11 +87,14 @@
 				<details><summary class="small">What the session showed</summary><pre>{req.pane_tail}</pre></details>
 			{/if}
 		{/if}
-		{#if outdated}
+		{#if agent.session_state !== 'logged_out'}
+			<!-- only offered when it is the fix: /login is typed into the pane, so on a session with a dialog open
+			     it would answer the dialog -->
+		{:else if outdated}
 			<div class="muted small">Remote login needs watcher v2+ (this one is {agent.watcher_version ? `v${agent.watcher_version}` : 'older'}).
 				On the agent's host: <code>curl -fsSL {location.origin}/install.sh | bash && board watch-start</code></div>
 		{:else}
-			<button class:ghost={agent.session_state !== 'logged_out'} onclick={start} disabled={busy}>Run /login</button>
+			<button onclick={start} disabled={busy}>Run /login</button>
 		{/if}
 	{/if}
 	{#if error}<div class="error small">{error}</div>{/if}

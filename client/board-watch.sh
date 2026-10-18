@@ -15,7 +15,7 @@
 # and, when the board has a newer one, installs the new board + board-watch.sh and exits, so its restart
 # loop (board watch-start, or the project's tmux.sh worker) starts the new version. Bump WATCH_VERSION
 # here to push a change to every agent.
-WATCH_VERSION=3
+WATCH_VERSION=6
 BOARD_HOME="${BOARD_HOME:-$HOME/.board}"
 source "$BOARD_HOME/config" || { echo "no $BOARD_HOME/config"; exit 1; }
 BOARD_API="${BOARD_API:-@BOARD_API@}"
@@ -48,16 +48,56 @@ screen() { tmux capture-pane -p -J -t "$T" 2>/dev/null | sed 's/[[:space:]]*$//'
 # The error line is short and shaped "<problem> · <remedy>"; anchoring on that keeps an assistant reply that merely
 # quotes "Please run /login" from counting.
 LOGOUT_RE='^[[:space:]]*(●|⏺)[[:space:]]+[^·]{1,80}[[:space:]]·[[:space:]](Please run /login|Run /login|Sign in again)'
-SESSION=ok; SESSION_DETAIL=
+# Blocked = the session can't take input (and so can't get notifications) for BLOCKED_AFTER seconds:
+#   needs_input  no input line: a question (AskUserQuestion), permission or other dialog waits for a human
+#   no_claude    no Claude process under the pane (Claude exited; the pane's shell is all that is left).
+#                By process tree, not #{pane_current_command}: a pane started as `bash -c "claude; exec bash"`
+#                keeps bash as its foreground group leader, so tmux names it "bash" while Claude runs.
+# detail = the bottom of the screen (the dialog's question and options), for the human to see on the board.
+BLOCKED_AFTER="${BOARD_BLOCKED_AFTER:-120}"
+# is a Claude process (Claude Code names its process "claude") running anywhere under process $1?
+claude_under() {
+    [ -n "$1" ] || return 1
+    # if ps can't list processes here, say yes: a false "no Claude" would hold every notification
+    ps -e -o pid=,ppid=,comm= 2>/dev/null | awk -v root="$1" '
+        { par[$1] = $2; cmd[$1] = $3 }
+        END { if (NR < 2) exit 0
+              for (p in par) if (cmd[p] == "claude")
+                  for (q = p; q != "" && q > 1; q = par[q]) if (q == root) exit 0
+              exit 1 }'
+}
+SESSION=ok; SESSION_DETAIL=; BLOCKED_SINCE=0
 check_session() {
     pane_ok || return
-    local line state=ok detail=
+    local line state=ok detail= cmd
     while IFS= read -r line; do
         if [[ "$line" =~ ^[[:space:]]*(●|⏺)[[:space:]] ]]; then
             if [[ "$line" =~ $LOGOUT_RE ]]; then state=logged_out; detail="${line#*[●⏺] }"; else state=ok; detail=; fi
         elif [[ "$line" == *"Login successful"* ]]; then state=ok; detail=
         fi
     done < <(screen)
+    if [ "$state" = ok ]; then
+        if ! claude_under "$(tmux display-message -p -t "$T" '#{pane_pid}' 2>/dev/null)"; then
+            cmd=$(tmux display-message -p -t "$T" '#{pane_current_command}' 2>/dev/null)
+            state=no_claude; detail="no Claude process in the pane (it runs ${cmd:-?})"
+        elif input_busy && [[ "$INPUT_WHY" == "no Claude input line"* ]]; then
+            state=needs_input
+            # the dialog: what follows the second-to-last horizontal rule (dialogs are drawn between rules)
+            detail=$(screen | awk '{ l[NR] = $0 } /[^[:space:]]/ { n = NR } /^[[:space:]]*[─━]{10,}[[:space:]]*$/ { r2 = r1; r1 = NR }
+                END { s = r2 ? r2 + 1 : n - 13; if (s < 1 || n - s > 30) s = n - 13; if (s < 1) s = 1
+                      for (i = s; i <= n; i++) if (l[i] !~ /^[[:space:]]*$/ && l[i] !~ /^[[:space:]]*[─━]+[[:space:]]*$/) print l[i] }' \
+                     | sed -E 's/^[[:space:]│]+//; s/[[:space:]│]+$//' | awk 'NR > 1 { printf " / " } { printf "%s", $0 }')
+        fi
+        if [ "$state" != ok ]; then
+            # debounced: a dialog someone is answering right now, or a restarting claude, is not "blocked"
+            [ "$BLOCKED_SINCE" = 0 ] && BLOCKED_SINCE=$(now)
+            if [ $(( $(now) - BLOCKED_SINCE )) -lt "$BLOCKED_AFTER" ]; then state=ok; detail=; fi
+        else
+            BLOCKED_SINCE=0
+        fi
+    else
+        BLOCKED_SINCE=0
+    fi
     if [ "$state" != "$SESSION" ]; then log "session: $SESSION -> $state ${detail:+($detail)}"; fi
     SESSION=$state; SESSION_DETAIL=$detail
 }

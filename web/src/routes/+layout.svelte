@@ -2,7 +2,7 @@
 	import favicon from '#lib/assets/favicon.svg';
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
-	import { api, session, setSession } from '#lib/api.svelte.ts';
+	import { api, session, setSession, SESSION_PROBLEM } from '#lib/api.svelte.ts';
 	import { every, REFRESH_MS } from '#lib/poll.ts';
 	import type { LayoutProps } from './$types';
 
@@ -18,12 +18,14 @@
 		}
 	});
 
-	// agents whose Claude session is logged out (reported by their watchers): shown on every page
-	let loggedOut = $state<string[]>([]);
+	// agents whose Claude session needs a human (logged out, a dialog open, Claude not running), as
+	// their watchers report it: shown on every page
+	let blocked = $state<{ handle: string; session_state: string }[]>([]);
 	$effect(() => {
 		if (!session.current) return;
-		const check = () => api<{ handle: string }[]>('/agents?select=handle&session_state=eq.logged_out&active=is.true&kind=eq.agent')
-			.then((r) => (loggedOut = r.data.map((a) => a.handle))).catch(() => {});
+		const check = () => api<{ handle: string; session_state: string }[]>(
+			`/agents?select=handle,session_state&session_state=in.(${Object.keys(SESSION_PROBLEM).join(',')})&active=is.true&kind=eq.agent`)
+			.then((r) => (blocked = r.data)).catch(() => {});
 		check();
 		return every(REFRESH_MS, check);
 	});
@@ -63,10 +65,10 @@
 	</div>
 </header>
 
-{#if session.current && loggedOut.length && !page.url.pathname.startsWith('/agents')}
+{#if session.current && blocked.length && !page.url.pathname.startsWith('/agents')}
 	<a class="sessions-alert" href="/agents">
-		<b>{loggedOut.join(', ')}</b>: Claude session{loggedOut.length === 1 ? ' is' : 's are'} logged out.
-		{session.current.is_admin ? 'Log in again from Participants →' : 'Tell an admin.'}
+		{#each blocked as b, i}{i ? ' · ' : ''}<b>{b.handle}</b>: {SESSION_PROBLEM[b.session_state]}{/each}
+		— they get no board notifications until this is cleared. Participants →
 	</a>
 {/if}
 

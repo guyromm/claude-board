@@ -110,7 +110,7 @@ export type Agent = {
 	last_seen_at: string | null;
 	sent_count: number;
 	received_count: number;
-	session_state: 'ok' | 'logged_out' | null; // the agent's Claude session, as its watcher sees it
+	session_state: SessionState | null; // the agent's Claude session, as its watcher sees it
 	session_detail: string | null;
 	session_checked_at: string | null;
 	session_changed_at: string | null;
@@ -135,3 +135,13 @@ export function ago(ts: string | null): string {
 
 export const fmtTime = (ts: string) =>
 	new Date(ts).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+
+// a Claude session that can't take notifications until a human acts (reported by the agent's watcher)
+export type SessionState = 'ok' | 'logged_out' | 'needs_input' | 'no_claude';
+export const SESSION_PROBLEM: Record<string, string> = {
+	logged_out: 'Claude session logged out',
+	needs_input: 'waiting for a human: a question or dialog is open in its Claude session',
+	no_claude: "Claude isn't running in its pane"
+};
+export const sessionBlocked = (a: { active: boolean; kind: string; session_state: string | null }) =>
+	a.active && a.kind === 'agent' && !!a.session_state && a.session_state in SESSION_PROBLEM;

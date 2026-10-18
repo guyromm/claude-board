@@ -109,8 +109,8 @@ CREATE INDEX IF NOT EXISTS recipient_handle_idx ON board.recipient (handle, mess
 CREATE INDEX IF NOT EXISTS recipient_pending_idx ON board.recipient (handle) WHERE notified_at IS NULL;
 
 -- Claude session health, as seen by the agent's watcher (it reads the agent's tmux pane)
-ALTER TABLE board.agent ADD COLUMN IF NOT EXISTS session_state text;          -- ok | logged_out
-ALTER TABLE board.agent ADD COLUMN IF NOT EXISTS session_detail text;         -- the matching pane line
+ALTER TABLE board.agent ADD COLUMN IF NOT EXISTS session_state text;          -- ok | logged_out | needs_input | no_claude
+ALTER TABLE board.agent ADD COLUMN IF NOT EXISTS session_detail text;         -- the matching pane line / the dialog on screen
 ALTER TABLE board.agent ADD COLUMN IF NOT EXISTS session_checked_at timestamptz;
 ALTER TABLE board.agent ADD COLUMN IF NOT EXISTS session_changed_at timestamptz;
 ALTER TABLE board.agent ADD COLUMN IF NOT EXISTS watcher_version integer;     -- NULL: watcher predates health checks
@@ -725,14 +725,14 @@ CREATE OR REPLACE FUNCTION api.watch_sync(session_state text DEFAULT NULL, sessi
 RETURNS api."text/plain" LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = board, public AS $$
 DECLARE me text := board.require_me(); l board.login_request;
 BEGIN
-    IF watch_sync.session_state NOT IN ('ok', 'logged_out') THEN
-        RAISE EXCEPTION 'session_state must be ok or logged_out';
+    IF watch_sync.session_state NOT IN ('ok', 'logged_out', 'needs_input', 'no_claude') THEN
+        RAISE EXCEPTION 'session_state must be ok, logged_out, needs_input or no_claude';
     END IF;
     UPDATE board.agent a SET
         session_changed_at = CASE WHEN a.session_state IS DISTINCT FROM watch_sync.session_state
                                   THEN now() ELSE a.session_changed_at END,
         session_state = coalesce(watch_sync.session_state, a.session_state),
-        session_detail = CASE WHEN watch_sync.session_state IS NOT NULL THEN left(watch_sync.session_detail, 300)
+        session_detail = CASE WHEN watch_sync.session_state IS NOT NULL THEN left(watch_sync.session_detail, 1000)
                               ELSE a.session_detail END,
         session_checked_at = CASE WHEN watch_sync.session_state IS NOT NULL THEN now() ELSE a.session_checked_at END,
         watcher_version = coalesce(version, a.watcher_version), last_seen_at = now()
@@ -786,6 +786,11 @@ BEGIN
     IF coalesce(a.watcher_version, 0) < 2 THEN
         RAISE EXCEPTION '%''s watcher is too old for remote login', a.handle
             USING HINT = 'update it on that host: re-run the install one-liner (curl -fsSL <board URL>/install.sh | bash), then board watch-start';
+    END IF;
+    -- the watcher TYPES /login: into an open dialog it would answer the dialog, into a bare shell it would run it
+    IF a.session_state IN ('needs_input', 'no_claude') THEN
+        RAISE EXCEPTION '%''s Claude session can''t take /login right now (%)', a.handle, a.session_state
+            USING HINT = 'clear the dialog in its tmux pane first, or start Claude there';
     END IF;
     PERFORM board.expire_logins();
     UPDATE board.login_request x SET state = 'cancelled', code = NULL, updated_at = now(),

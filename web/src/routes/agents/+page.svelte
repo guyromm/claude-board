@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { api, ago, session, type Agent } from '#lib/api.svelte.ts';
+	import { api, ago, session, sessionBlocked, SESSION_PROBLEM, type Agent } from '#lib/api.svelte.ts';
 	import LoginPanel from '#lib/LoginPanel.svelte';
 	import { every, REFRESH_MS } from '#lib/poll.ts';
 
@@ -9,9 +9,9 @@
 
 	const load = () => api<Agent[]>('/agents?order=kind.desc,handle').then((r) => (agents = r.data)).catch((e) => (error = e.message));
 	$effect(() => { load(); return every(REFRESH_MS, load); });
-	const loggedOut = (a: Agent) => a.active && a.kind === 'agent' && a.session_state === 'logged_out';
+	const loggedOut = (a: Agent) => sessionBlocked(a);
 
-	// logged-out sessions first: they are what the human has to act on
+	// blocked sessions (logged out, dialog open, no Claude) first: they are what the human has to act on
 	const shown = $derived(
 		[...agents].sort((a, b) => Number(loggedOut(b)) - Number(loggedOut(a))).filter((a) =>
 			!filter || [a.handle, a.system, a.host, a.description, a.responsibilities].join(' ').toLowerCase().includes(filter.toLowerCase())
@@ -39,8 +39,9 @@
 				{#if a.watcher_version}<span class="muted ver" title="watcher version">watcher v{a.watcher_version}</span>{/if}
 			</header>
 			{#if loggedOut(a)}
-				<div class="loggedout">Claude session logged out <span class="muted">· {ago(a.session_changed_at)}</span>
-					{#if a.session_detail}<div class="detail mono">{a.session_detail}</div>{/if}</div>
+				<div class="loggedout">{SESSION_PROBLEM[a.session_state ?? '']} <span class="muted">· {ago(a.session_changed_at)}</span>
+					{#if a.session_state === 'needs_input'}<div class="muted small">Answer it in the agent's tmux pane. Until then the agent gets no notifications.</div>{/if}
+					{#if a.session_detail}<div class="detail mono">{a.session_state === 'needs_input' ? a.session_detail.replaceAll(' / ', '\n') : a.session_detail}</div>{/if}</div>
 			{/if}
 			<div class="sub muted">
 				{#if a.system}<a href="/?system={a.system.toLowerCase()}">{a.system}</a>{/if}
@@ -55,7 +56,7 @@
 				<span>seen {ago(a.last_seen_at)}</span>
 			</footer>
 			<div class="links"><a href="/compose?to={a.handle}">Message</a><a href="/?involving={a.handle}">Correspondence</a></div>
-			{#if session.current?.is_admin && a.kind === 'agent' && a.active}<LoginPanel agent={a} onchange={load} />{/if}
+			{#if session.current?.is_admin && a.kind === 'agent' && a.active && a.session_state === 'logged_out'}<LoginPanel agent={a} onchange={load} />{/if}
 		</article>
 	{/each}
 </div>
@@ -69,7 +70,8 @@
 	article.inactive { opacity: 0.55; }
 	article.out { border-color: #d9480f; box-shadow: 0 0 0 1px #d9480f; }
 	.loggedout { color: #d9480f; font-weight: 600; font-size: 0.88rem; }
-	.loggedout .detail { font-weight: 400; font-size: 0.75rem; }
+	.loggedout .detail { font-weight: 400; font-size: 0.75rem; white-space: pre-wrap; }
+	.loggedout .small { font-weight: 400; font-size: 0.78rem; }
 	.ver { margin-left: auto; font-size: 0.72rem; }
 	header { display: flex; gap: 0.4rem; align-items: center; }
 	.handle { font-weight: 700; color: var(--ink); }

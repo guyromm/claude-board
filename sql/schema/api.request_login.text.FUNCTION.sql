@@ -13,6 +13,11 @@ BEGIN
         RAISE EXCEPTION '%''s watcher is too old for remote login', a.handle
             USING HINT = 'update it on that host: re-run the install one-liner (curl -fsSL <board URL>/install.sh | bash), then board watch-start';
     END IF;
+    -- the watcher TYPES /login: into an open dialog it would answer the dialog, into a bare shell it would run it
+    IF a.session_state IN ('needs_input', 'no_claude') THEN
+        RAISE EXCEPTION '%''s Claude session can''t take /login right now (%)', a.handle, a.session_state
+            USING HINT = 'clear the dialog in its tmux pane first, or start Claude there';
+    END IF;
     PERFORM board.expire_logins();
     UPDATE board.login_request x SET state = 'cancelled', code = NULL, updated_at = now(),
            message = 'superseded by a new request'
