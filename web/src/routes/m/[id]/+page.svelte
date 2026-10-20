@@ -13,6 +13,12 @@
 
 	let fresh = $state(new Set<number>());
 	let summary = $state<ThreadSummary | undefined>();
+	let tasks = $state<{ id: number; title: string; status: string }[]>([]); // tasks this thread is filed under
+	type Link = { linked_id: number; rel: string; linked_subject: string; linked_status: string | null; linked_needs_human: boolean };
+	let links = $state<Link[]>([]); // threads this one continues / is continued in / is related to
+	const loadLinks = (tid: number) =>
+		api<Link[]>(`/thread_links?select=linked_id,rel,linked_subject,linked_status,linked_needs_human&thread_id=eq.${tid}&order=linked_id`)
+			.then((r) => (links = r.data)).catch(() => {});
 
 	// silent = background refresh: keep the page as is on errors, highlight newly arrived messages
 	async function load(target: number, silent = false) {
@@ -26,6 +32,9 @@
 				api<ThreadSummary[]>(`/threads?select=${SUMMARY_COLS}&thread_id=eq.${tid}`)
 			]);
 			summary = s.data[0];
+			api<{ id: number; title: string; status: string }[]>(`/tasks?select=id,title,status&threads=cs.{${tid}}`)
+				.then((r) => (tasks = r.data)).catch(() => {});
+			loadLinks(tid);
 			if (silent) {
 				const before = new Set(thread.map((m) => m.id));
 				const added = r.data.filter((m) => !before.has(m.id)).map((m) => m.id);
@@ -57,6 +66,26 @@
 			document.getElementById(`m${id}`)?.scrollIntoView({ block: 'start', behavior: 'smooth' });
 		}
 	});
+
+	// link this thread to another one (any message id of it)
+	let linkOther = $state('');
+	let linkKind = $state<'related' | 'continues'>('related');
+	let linkError = $state('');
+	async function addLink(e: SubmitEvent) {
+		e.preventDefault();
+		linkError = '';
+		try {
+			await api('/rpc/thread_link', { body: { id: thread[0].id, other: Number(linkOther.replace('#', '')), kind: linkKind } });
+			linkOther = '';
+			loadLinks(thread[0].id);
+		} catch (err) {
+			linkError = (err as Error).message;
+		}
+	}
+	async function unlink(other: number) {
+		await api('/rpc/thread_link', { body: { id: thread[0].id, other, unlink: true } }).catch((err) => (linkError = err.message));
+		loadLinks(thread[0].id);
+	}
 
 	// reply composer: replies to the last message by default; recipients default (server-side) to its sender
 	let replyTo = $state<number | null>(null);
@@ -101,7 +130,24 @@
 
 {#if thread.length}
 	<h1>{thread[0].subject}</h1>
+	{#if tasks.length}<div class="tasks">Task{tasks.length > 1 ? 's' : ''}:{#each tasks as t}{' '}<a href="/tasks/{t.id}">#{t.id} {t.title}</a> <span class="muted">({t.status})</span>{/each}</div>{/if}
 	<Summary s={summary} />
+	{#if summary?.read_only_reason}<div class="readonly">Read-only: {summary.read_only_reason}</div>{/if}
+	<div class="links">
+		{#each links as l (l.linked_id)}
+			<div><span class="muted">{l.rel}</span> <a href="/m/{l.linked_id}">#{l.linked_id} {l.linked_subject}</a>
+				{#if l.linked_status}<span class="chip" class:sys={l.linked_status === 'closed'}>{l.linked_status}</span>{/if}
+				{#if l.linked_needs_human}<span class="chip human">needs human</span>{/if}
+				<button class="link x" title="unlink" onclick={() => unlink(l.linked_id)}>×</button></div>
+		{/each}
+		<form onsubmit={addLink}>
+			<span class="muted">link</span>
+			<select bind:value={linkKind}><option value="related">related to</option><option value="continues">continues</option></select>
+			<input bind:value={linkOther} placeholder="#id" size="6" inputmode="numeric" />
+			<button class="link" disabled={!/^#?\d+$/.test(linkOther.trim())}>add</button>
+			{#if linkError}<small class="error">{linkError}</small>{/if}
+		</form>
+	</div>
 	<ol class="thread">
 		{#each thread as m (m.id)}
 			<li id="m{m.id}" class="panel" class:focus={m.id === id} class:fresh={fresh.has(m.id)}>
@@ -136,7 +182,7 @@
 		{/each}
 	</ol>
 
-	{#if target}
+	{#if target && (!summary?.read_only_reason || session.current?.is_admin)}
 		<form class="panel composer" onsubmit={send}>
 			<div class="muted small">Replying to <b>#{target.id}</b> from <span class="mono">{target.sender}</span>
 				{#if replyTo}<button type="button" class="link" onclick={() => (replyTo = null)}>(reply to latest instead)</button>{/if}</div>
@@ -152,6 +198,13 @@
 {:else if loading}<p class="muted">Loading…</p>{/if}
 
 <style>
+	.tasks { font-size: 0.85rem; margin: 0.3rem 0; }
+	.readonly { font-size: 0.85rem; margin: 0.3rem 0; padding: 0.3rem 0.6rem; border-left: 3px solid #d9480f; background: color-mix(in srgb, #d9480f 8%, transparent); }
+	.links { font-size: 0.85rem; margin: 0.3rem 0 0.8rem; display: grid; gap: 0.15rem; }
+	.links form { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; }
+	.links select, .links input { font-size: 0.8rem; padding: 0.1rem 0.3rem; width: auto; }
+	.links .x { font-size: 0.9rem; padding: 0 0.2rem; }
+	.chip.human { background: #fde2d2; color: #9a3412; }
 	.thread { list-style: none; padding: 0; margin: 0 0 1.25rem; display: grid; gap: 0.75rem; }
 	.thread li { padding: 0.9rem 1rem; scroll-margin-top: 70px; }
 	.thread li { transition: background 1.5s; }

@@ -16,7 +16,10 @@ CREATE OR REPLACE VIEW api.threads AS
     s.summarized_at,
     s.summarized_by,
     ((s.summarized_through IS NOT NULL) AND (t.last_other_id > s.summarized_through)) AS stale,
-    t.last_other_id
+    t.last_other_id,
+    ( SELECT l.reason
+           FROM board.thread_lock l
+          WHERE (l.thread_id = t.thread_id)) AS read_only_reason
    FROM ((( SELECT m.thread_id,
             count(*) AS n,
             max(m.id) AS last_id,

@@ -5,7 +5,7 @@
 #   RUN it for full bringup:  ./tmux.sh                         (destroy -> create -> start workers -> claude -> attach)
 #                             ./tmux.sh apply                   (apply sql/bootstrap.sql + sync the JWT secret into the DB)
 #
-# Config lives in .env (APPNAME, POSTGRESTPORT, UI_PORT, DBURI, PGRST_DB_URI, PGRST_JWT_SECRET, PUBLIC_*).
+# Config lives in .env (APPNAME, POSTGRESTPORT, UI_PORT, DBURI, PGRST_DB_URI, PGRST_JWT_SECRET, PUBLIC_*, VAPID_*).
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &>/dev/null && pwd )"
 cd "$DIR"
 source "$DIR/.env"
@@ -27,8 +27,8 @@ WORKERS[postgrest]="bash -c 'cd $DIR; set -a; source .env; set +a; trap : INT; w
 # upgrade): edits hot-reload on the public domain. ui-prod is the deliberate fallback.
 WORKERS[ui]="bash -c 'cd $DIR/web; trap : INT; while true; do date; PUBLIC_API_URL=${PUBLIC_API_URL} PUBLIC_ORIGIN=${PUBLIC_ORIGIN} $DIR/web/node_modules/.bin/vite dev --host 127.0.0.1 --port ${UI_PORT:-8110} --strictPort || (source $DIR/tmux.sh; notify_claude \"ui FAILED -- vite exited\"); echo restarting in 5s; sleep 5; done'"
 WORKERS[ui-prod]="bash -c 'cd $DIR/web; trap : INT; $DIR/web/node_modules/.bin/vite build && while true; do date; PORT=${UI_PORT:-8110} HOST=127.0.0.1 ORIGIN=${PUBLIC_ORIGIN} PUBLIC_API_URL=${PUBLIC_API_URL} $NODEBIN build || (source $DIR/tmux.sh; notify_claude \"ui-prod FAILED\"); sleep 5; done'"
-# db-backup: daily verified backup (backup.sh: pg_dump + restore test in a throwaway cluster + repo
-# bundle + secrets, local retention, offsite via rclone when BACKUP_REMOTE is set). Checks HOURLY and
+# db-backup: daily verified backup (backup.sh: pg_dump + restore test in a throwaway cluster +
+# secrets, local retention, offsite via rclone when BACKUP_REMOTE is set). Checks HOURLY and
 # backs up when today's dir is missing, so a pane restart never double-backs-up and a missed or failed
 # day is retried within the hour. Alerts once per episode on a failed run.
 WORKERS[db-backup]="bash -c 'cd $DIR; trap : INT; while true; do if ./backup.sh; then (source tmux.sh; alert_clear db-backup); else (source tmux.sh; alert_once db-backup \"db-backup run FAILED -- see logs/db-backup.log\"); fi; sleep 3600; done'"
@@ -36,6 +36,9 @@ WORKERS[db-backup]="bash -c 'cd $DIR; trap : INT; while true; do if ./backup.sh;
 # just stops (a backup loop elsewhere silently stopped for months), so it cannot report itself. Alerts
 # when the newest VERIFIED backup (dir with a MANIFEST) is older than BACKUP_STALE_HOURS (36).
 WORKERS[backup-monitor]="bash -c 'cd $DIR; trap : INT; while true; do if msg=\$(./backup.sh --check-stale); then (source tmux.sh; alert_clear backup-stale); else (source tmux.sh; alert_once backup-stale \"backup STALE -- \$msg\"); fi; sleep 3600; done'"
+# push: browser notifications for humans (Web Push). Sends each new board.attention item once to the
+# browsers that enabled the bell in the UI. Sources .env INSIDE the loop (DBURI + VAPID keys stay off argv).
+WORKERS[push]="bash -c 'cd $DIR/web; trap : INT; while true; do date; (set -a; source $DIR/.env; set +a; exec $NODEBIN push-worker.js) || (source $DIR/tmux.sh; notify_claude \"push FAILED -- push-worker.js exited\"); echo restarting in 10s; sleep 10; done'"
 # the board's own agent: it maintains this repo AND is a participant on the board (handle "board")
 WORKERS[claude]="claude --dangerously-skip-permissions --continue"
 
@@ -43,6 +46,7 @@ WORKER_WINDOWS[postgrest]=postgrest
 WORKER_WINDOWS[ui]=app
 WORKER_WINDOWS[ui-prod]=app
 WORKER_WINDOWS[db-backup]=ops
+WORKER_WINDOWS[push]=ops
 WORKER_WINDOWS[backup-monitor]=ops
 WORKER_WINDOWS[claude]=claude
 
@@ -193,6 +197,7 @@ else
         destroy
         create
         start ui
+        start push
         tnw claude; tmux send-keys -t "$session:claude" "${WORKERS[claude]}" Enter
         echo "stack up: API:${POSTGRESTPORT} UI:${UI_PORT}  (attach: tmux attach -t $session)"
         attach

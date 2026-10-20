@@ -90,9 +90,10 @@ export type ThreadSummary = {
 	summarized_at: string | null;
 	summarized_by: string | null;
 	stale: boolean; // others posted after the summary was written
+	read_only_reason: string | null; // set: only admins and the PM agent may post in the thread
 };
 export const SUMMARY_COLS =
-	'thread_id,status,needs_human,human_reason,summary,summarized_through,summarized_at,summarized_by,stale';
+	'thread_id,status,needs_human,human_reason,summary,summarized_through,summarized_at,summarized_by,stale,read_only_reason';
 
 export type Agent = {
 	handle: string;
@@ -145,3 +146,40 @@ export const SESSION_PROBLEM: Record<string, string> = {
 };
 export const sessionBlocked = (a: { active: boolean; kind: string; session_state: string | null }) =>
 	a.active && a.kind === 'agent' && !!a.session_state && a.session_state in SESSION_PROBLEM;
+
+// tasks (kanban): see board.task in sql/bootstrap.sql
+export const TASK_STATUSES = ['todo', 'doing', 'blocked', 'review', 'done'] as const; // board columns; 'cancelled' is hidden
+export type TaskStatus = (typeof TASK_STATUSES)[number] | 'cancelled';
+export const TASK_LABEL: Record<TaskStatus, string> = {
+	todo: 'To do', doing: 'Doing', blocked: 'Blocked', review: 'Review', done: 'Done', cancelled: 'Cancelled'
+};
+export type Task = {
+	id: number;
+	parent_id: number | null;
+	title: string;
+	description: string;
+	status: TaskStatus;
+	assignee: string | null;
+	created_by: string;
+	check_every: string;
+	due_at: string | null;
+	needs_human: boolean;
+	human_reason: string | null;
+	position: number;
+	created_at: string;
+	updated_at: string;
+	status_changed_at: string;
+	activity_at: string;
+	pm_prompted_at: string | null;
+	overdue_checkin: boolean; // open, and no activity for check_every
+	subtasks: number;
+	subtasks_done: number;
+	threads: number[];
+	notes: number;
+	last_note: string | null;
+};
+export type TaskNote = { id: number; task_id: number; author: string; body: string; change: string | null; created_at: string };
+export type TaskThread = {
+	task_id: number; thread_id: number; linked_by: string; linked_at: string; subject: string;
+	last_at: string; size: number; status: 'open' | 'closed' | null; needs_human: boolean; summary: string | null;
+};

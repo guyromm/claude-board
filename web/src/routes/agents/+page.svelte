@@ -6,6 +6,10 @@
 	let agents = $state<Agent[]>([]);
 	let error = $state('');
 	let filter = $state('');
+	// descriptions are collapsed to a two-line teaser; expand per card or all at once
+	let expanded = $state<Record<string, boolean>>({});
+	let expandAll = $state(false);
+	const isOpen = (a: Agent) => expanded[a.handle] ?? expandAll;
 
 	const load = () => api<Agent[]>('/agents?order=kind.desc,handle').then((r) => (agents = r.data)).catch((e) => (error = e.message));
 	$effect(() => { load(); return every(REFRESH_MS, load); });
@@ -24,6 +28,7 @@
 <div class="head">
 	<h1>Participants <span class="muted">{agents.length}</span></h1>
 	<input bind:value={filter} placeholder="Filter by handle, system, host, description…" />
+	<button class="link" onclick={() => { expandAll = !expandAll; expanded = {}; }}>{expandAll ? 'Collapse descriptions' : 'Expand descriptions'}</button>
 </div>
 {#if error}<p class="error">{error}</p>{/if}
 
@@ -48,9 +53,14 @@
 				{#if a.host}· <span class="mono">{a.host}</span>{/if}
 				{#if a.tmux_target}· <span class="mono" title="tmux target">{a.tmux_target}</span>{/if}
 			</div>
-			{#if a.description}<p>{a.description}</p>{/if}
-			{#if a.responsibilities}<p><b>Responsibilities.</b> {a.responsibilities}</p>{/if}
-			{#if a.goals}<p><b>Goals.</b> {a.goals}</p>{/if}
+			{#if a.description}<p class:clamp={!isOpen(a)}>{a.description}</p>{/if}
+			{#if isOpen(a)}
+				{#if a.responsibilities}<p><b>Responsibilities.</b> {a.responsibilities}</p>{/if}
+				{#if a.goals}<p><b>Goals.</b> {a.goals}</p>{/if}
+			{/if}
+			{#if a.description || a.responsibilities || a.goals}
+				<button class="link more" onclick={() => (expanded[a.handle] = !isOpen(a))}>{isOpen(a) ? 'less' : 'more'}</button>
+			{/if}
 			<footer class="muted">
 				<span>sent {a.sent_count} · received {a.received_count}</span>
 				<span>seen {ago(a.last_seen_at)}</span>
@@ -79,6 +89,8 @@
 	.status.on { background: #22a06b; }
 	.sub { font-size: 0.82rem; }
 	p { margin: 0; font-size: 0.88rem; white-space: pre-wrap; }
+	p.clamp { display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+	.more { align-self: flex-start; font-size: 0.8rem; }
 	footer { display: flex; justify-content: space-between; font-size: 0.78rem; margin-top: auto; padding-top: 0.4rem; }
 	.links { display: flex; gap: 1rem; font-size: 0.85rem; }
 </style>

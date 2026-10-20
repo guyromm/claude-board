@@ -4,6 +4,7 @@
 	import { goto } from '$app/navigation';
 	import { api, session, setSession, SESSION_PROBLEM } from '#lib/api.svelte.ts';
 	import { every, REFRESH_MS } from '#lib/poll.ts';
+	import { push, pushSupported, pushRefresh, pushEnable, pushDisable } from '#lib/push.svelte.ts';
 	import type { LayoutProps } from './$types';
 
 	// the domain label after "board." (board.example.com -> ".example") as the logo's suffix
@@ -30,8 +31,13 @@
 		return every(REFRESH_MS, check);
 	});
 
+	// browser notifications (push worker): the bell shows whether this browser gets them
+	$effect(() => { if (session.current) pushRefresh().catch(() => {}); });
+
 	const nav = [
 		{ href: '/', label: 'Messages' },
+		{ href: '/tasks', label: 'Tasks' },
+		{ href: '/docs', label: 'Docs' },
 		{ href: '/agents', label: 'Participants' },
 		{ href: '/compose', label: 'Compose' }
 	];
@@ -58,6 +64,13 @@
 				{/if}
 			</nav>
 			<div class="who">
+				{#if pushSupported}
+					<button class="link bell" disabled={push.busy} onclick={() => (push.on ? pushDisable() : pushEnable())}
+						title={push.error || (push.on ? 'Browser notifications are on: you are told when an agent or a decision needs you. Click to turn off.'
+							: 'Turn on browser notifications for when an agent or a decision needs you')}
+						class:err={push.error}>{push.on ? '🔔' : '🔕'}</button>
+					{#if push.error}<small class="perr">{push.error}</small>{/if}
+				{/if}
 				<span>{session.current.handle}</span>
 				<button class="link" onclick={() => setSession(null)}>Sign out</button>
 			</div>
@@ -72,7 +85,8 @@
 	</a>
 {/if}
 
-<main>
+<!-- the task board is a kanban: give it the whole window width -->
+<main class:wide={page.url.pathname === '/tasks'}>
 	{#if session.current || PUBLIC.includes(page.url.pathname)}
 		{@render children()}
 	{/if}
@@ -156,10 +170,14 @@
 	nav a.on { color: var(--ink); border-bottom-color: var(--accent); text-decoration: none; }
 	.who { display: flex; gap: 0.75rem; align-items: center; font-size: 0.9rem; }
 	.who span { font-family: var(--mono); }
+	.bell { font-size: 1rem; text-decoration: none; }
+	.bell.err { outline: 1px solid var(--warn); border-radius: 4px; }
+	.perr { color: var(--warn); font-size: 0.75rem; max-width: 18rem; }
 	@media (max-width: 600px) {
 		.bar { gap: 0.4rem 1rem; }
 		nav { order: 3; flex-basis: 100%; gap: 0.9rem; font-size: 0.9rem; }
 		.who { margin-left: auto; }
 	}
 	main { max-width: 1100px; margin: 0 auto; padding: 1.25rem 1rem 4rem; }
+	main.wide { max-width: none; }
 </style>

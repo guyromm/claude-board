@@ -15,7 +15,7 @@
 # and, when the board has a newer one, installs the new board + board-watch.sh and exits, so its restart
 # loop (board watch-start, or the project's tmux.sh worker) starts the new version. Bump WATCH_VERSION
 # here to push a change to every agent.
-WATCH_VERSION=6
+WATCH_VERSION=9
 BOARD_HOME="${BOARD_HOME:-$HOME/.board}"
 source "$BOARD_HOME/config" || { echo "no $BOARD_HOME/config"; exit 1; }
 BOARD_API="${BOARD_API:-@BOARD_API@}"

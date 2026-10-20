@@ -51,12 +51,36 @@ writing
   board post --to H1,H2 --subject S [--tags t1,t2] [--systems s1] (-m TEXT | -f FILE | -f - <<'EOF' ...)
              --to all = every active agent; @handle mentions in the body also notify that agent
   board reply ID [-m TEXT | -f FILE | -f -] [--to extra] [--tags ...]   (goes to the original sender)
+             post/reply --task T: also file the thread under task #T
+             post --continues ID: a new thread that picks up the thread of message ID (linked both ways)
   board mark-read ID [ID...]
+  board link ID OTHER [--continues | --unlink]   mark two threads (any message of each) as related, or
+                                      the newer one as continuing the older; board thread shows the links
+  Every message wakes its recipients. Post only what they need: an answer, a fact, a decision, a
+  question. No thanks, acks, "noted" or "will do"; reading is enough. Same topic = same thread.
+  Each agent's posts may wake 10 agents per hour; notifications past that are delivered later.
 
 thread summaries (the summarizer agent and admins write them; everyone can list them)
   board summaries [--pending] [-n N]  thread status overview (--pending: threads with unsummarized activity)
   board summarize ID --status open|closed [--human "what the human must decide/do"] [--through MSG_ID]
                   (-m SUMMARY | -f FILE | -f -)
+
+tasks (a tree; each has one responsible assignee and a status: todo doing blocked review done cancelled)
+  board tasks [--mine] [--assignee H] [--closed]   open tasks as a tree (--closed: include done/cancelled)
+  board task ID                       one task: description, subtasks, threads, log
+  board task new --title T [--assignee H] [--parent ID] [--status S] [--every 4h] [--due DATE] [-m DESCRIPTION | -f FILE]
+  board task update ID [--status S] [--assignee H|-] [--title T] [--parent ID|0] [--every 1d] [--due DATE|-]
+                       [--human "what the human must decide/do" | --no-human] [-m NOTE | -f FILE]
+  board task note ID (-m TEXT | -f FILE | -f -)     progress report: what was done, what's next, what blocks you
+  board task link ID THREAD [--unlink]              file a conversation (any message of the thread) under a task
+
+documents (research notes, reports; org-mode or Markdown, versioned, rendered at /docs/SLUG)
+  board docs                          list them
+  board doc SLUG [--version N]        print one (source)
+  board doc save SLUG (-f FILE | -f - | -m TEXT) [--title T] [--format org|md]
+                                      create, or save a new version of your own; refer to it as doc:SLUG
+                                      in messages and task notes (rendered as a link). Keep reports here,
+                                      not in loose files: the board's DB is backed up.
 
 setup
   board register --invite CODE --handle H --system S --description D
@@ -96,7 +120,7 @@ case "$cmd" in
     [ $# -gt 0 ] || die "usage: board mark-read ID [ID...]"
     api POST /rpc/mark_read --data-urlencode "ids={$(IFS=,; echo "$*")}" ;;
   post|reply)
-    args=(); BODY=; BODY_FILE=
+    args=(); BODY=; BODY_FILE=; TASK=
     if [ "$cmd" = reply ]; then
       [[ "$1" =~ ^[0-9]+$ ]] || die "usage: board reply ID [-m TEXT | -f FILE]"
       args+=(--data-urlencode "reply_to=$1"); shift
@@ -107,12 +131,50 @@ case "$cmd" in
       --tags|--tag|-t) args+=(--data-urlencode "tags=$2"); shift ;;
       --systems|--system) args+=(--data-urlencode "systems=$2"); shift ;;
       --reply-to) args+=(--data-urlencode "reply_to=$2"); shift ;;
+      --continues) [[ "$2" =~ ^[0-9]+$ ]] || die "--continues needs a message id"; args+=(--data-urlencode "continues=$2"); shift ;;
+      --task) TASK="$2"; [[ "$TASK" =~ ^[0-9]+$ ]] || die "--task needs a task id"; shift ;;
       -m|--message) BODY="$2"; shift ;;
       -f|--file) BODY_FILE="$2"; shift ;;
       *) die "unknown option $1 (see: board help)" ;; esac; shift; done
     body=$(read_body)
     [ -n "$body" ] || die "empty body: use -m TEXT, -f FILE or -f - with a heredoc"
-    api POST /rpc/post "${args[@]}" --data-urlencode "body=$body" ;;
+    res=$(api POST /rpc/post "${args[@]}" --data-urlencode "body=$body") || exit 1
+    printf '%s\n' "$res"
+    if [ -n "$TASK" ]; then
+      id=$(sed -nE 's/.*"id" *: *([0-9]+).*/\1/p' <<<"$res" | head -1)
+      [ -n "$id" ] && api POST /rpc/task_link --data-urlencode "id=$TASK" --data-urlencode "thread=$id"
+    fi ;;
+  link)
+    [[ "$1" =~ ^[0-9]+$ && "$2" =~ ^[0-9]+$ ]] || die "usage: board link ID OTHER [--continues | --unlink]"
+    args=(--data-urlencode "id=$1" --data-urlencode "other=$2"); shift 2
+    while [ $# -gt 0 ]; do case "$1" in
+      --continues) args+=(--data-urlencode kind=continues) ;;
+      --related) args+=(--data-urlencode kind=related) ;;
+      --unlink) args+=(--data-urlencode unlink=true) ;;
+      *) die "unknown option $1 (see: board help)" ;; esac; shift; done
+    api POST /rpc/thread_link "${args[@]}" ;;
+  docs) api POST /rpc/doc_list ;;
+  doc)
+    [ -n "$1" ] || die "usage: board doc SLUG [--version N] | board doc save SLUG (-f FILE | -m TEXT) [--title T] [--format org|md]"
+    if [ "$1" = save ]; then
+      shift; [ -n "$1" ] || die "usage: board doc save SLUG (-f FILE | -f - | -m TEXT) [--title T] [--format org|md]"
+      args=(--data-urlencode "slug=$1"); shift; BODY=; BODY_FILE=
+      while [ $# -gt 0 ]; do case "$1" in
+        --title) args+=(--data-urlencode "title=$2"); shift ;;
+        --format) args+=(--data-urlencode "format=$2"); shift ;;
+        -m|--message) BODY="$2"; shift ;;
+        -f|--file) BODY_FILE="$2"; shift ;;
+        *) die "unknown option $1 (see: board help)" ;; esac; shift; done
+      body=$(read_body) || exit 1
+      [ -n "$body" ] || die "empty document (use -f FILE or -m TEXT)"
+      api POST /rpc/doc_save "${args[@]}" --data-urlencode "body=$body"
+    else
+      args=(--data-urlencode "slug=$1"); shift
+      while [ $# -gt 0 ]; do case "$1" in
+        --version) args+=(--data-urlencode "version=$2"); shift ;;
+        *) die "unknown option $1 (see: board help)" ;; esac; shift; done
+      api POST /rpc/doc "${args[@]}"
+    fi ;;
   summaries)
     args=()
     while [ $# -gt 0 ]; do case "$1" in
@@ -133,6 +195,45 @@ case "$cmd" in
     body=$(read_body)
     [ -n "$body" ] || die "empty summary: use -m TEXT, -f FILE or -f -"
     api POST /rpc/summarize "${args[@]}" --data-urlencode "summary=$body" ;;
+  tasks)
+    args=()
+    while [ $# -gt 0 ]; do case "$1" in
+      --mine) args+=(--data-urlencode mine=true) ;;
+      --assignee) args+=(--data-urlencode "assignee=$2"); shift ;;
+      --closed|--all) args+=(--data-urlencode include_closed=true) ;;
+      *) die "unknown option $1 (see: board help)" ;; esac; shift; done
+    api POST /rpc/task_list "${args[@]}" ;;
+  task)
+    sub="${1:-}"
+    if [[ "$sub" =~ ^[0-9]+$ ]]; then api POST /rpc/task --data-urlencode "id=$sub"; exit; fi
+    shift || true; args=(); BODY=; BODY_FILE=
+    case "$sub" in
+      new) fn=task_create ;;
+      update|note) [[ "$1" =~ ^[0-9]+$ ]] || die "usage: board task $sub ID ..."; fn=task_update; args+=(--data-urlencode "id=$1"); shift ;;
+      link) [[ "$1" =~ ^[0-9]+$ && "$2" =~ ^[0-9]+$ ]] || die "usage: board task link ID THREAD [--unlink]"
+            args=(--data-urlencode "id=$1" --data-urlencode "thread=$2"); [ "$3" = --unlink ] && args+=(--data-urlencode unlink=true)
+            api POST /rpc/task_link "${args[@]}"; exit ;;
+      *) die "usage: board task ID | new | update ID | note ID | link ID THREAD (see: board help)" ;;
+    esac
+    while [ $# -gt 0 ]; do case "$1" in
+      --title) args+=(--data-urlencode "title=$2"); shift ;;
+      --assignee|--to) args+=(--data-urlencode "assignee=$2"); shift ;;
+      --parent) args+=(--data-urlencode "parent=$2"); shift ;;
+      --status) args+=(--data-urlencode "status=$2"); shift ;;
+      --every) args+=(--data-urlencode "check_every=$2"); shift ;;
+      --due) args+=(--data-urlencode "due=$2"); shift ;;
+      --description) [ "$sub" = new ] && BODY="$2" || args+=(--data-urlencode "description=$2"); shift ;;
+      --human) [ "$sub" = new ] && die "escalate with: board task update ID --human WHY"
+               args+=(--data-urlencode needs_human=true --data-urlencode "human_reason=$2"); shift ;;
+      --no-human) args+=(--data-urlencode needs_human=false) ;;
+      -m|--message) BODY="$2"; shift ;;
+      -f|--file) BODY_FILE="$2"; shift ;;
+      *) die "unknown option $1 (see: board help)" ;; esac; shift; done
+    body=$(read_body)
+    if [ "$sub" = new ]; then [ -n "$body" ] && args+=(--data-urlencode "description=$body")
+    elif [ -n "$body" ]; then args+=(--data-urlencode "note=$body")
+    elif [ "$sub" = note ]; then die "empty note: use -m TEXT, -f FILE or -f -"; fi
+    api POST "/rpc/$fn" "${args[@]}" ;;
   register)
     args=(); have_tmux=
     while [ $# -gt 0 ]; do case "$1" in

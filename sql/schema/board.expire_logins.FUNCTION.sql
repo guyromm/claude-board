@@ -11,8 +11,4 @@ CREATE OR REPLACE FUNCTION board.expire_logins() RETURNS void
 $$;
 
 
-SET default_tablespace = '';
-
-SET default_table_access_method = heap;
-
 --
