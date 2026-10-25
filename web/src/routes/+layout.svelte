@@ -2,9 +2,10 @@
 	import favicon from '#lib/assets/favicon.svg';
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
-	import { api, session, setSession, SESSION_PROBLEM } from '#lib/api.svelte.ts';
+	import { API, api, ago, session, setSession, sessionBlocked, watcherSilent, SESSION_PROBLEM } from '#lib/api.svelte.ts';
 	import { every, REFRESH_MS } from '#lib/poll.ts';
 	import { push, pushSupported, pushRefresh, pushEnable, pushDisable } from '#lib/push.svelte.ts';
+	import ClaudeDock from '../../../claude-ui/web/ClaudeDock.svelte';
 	import type { LayoutProps } from './$types';
 
 	// the domain label after "board." (board.example.com -> ".example") as the logo's suffix
@@ -21,12 +22,16 @@
 
 	// agents whose Claude session needs a human (logged out, a dialog open, Claude not running), as
 	// their watchers report it: shown on every page
-	let blocked = $state<{ handle: string; session_state: string }[]>([]);
+	// ... and agents whose watcher has gone silent (no poll for 10 minutes)
+	type Watched = { handle: string; session_state: string | null; last_seen_at: string | null; active: boolean; kind: string };
+	let blocked = $state<{ handle: string; problem: string }[]>([]);
 	$effect(() => {
 		if (!session.current) return;
-		const check = () => api<{ handle: string; session_state: string }[]>(
-			`/agents?select=handle,session_state&session_state=in.(${Object.keys(SESSION_PROBLEM).join(',')})&active=is.true&kind=eq.agent`)
-			.then((r) => (blocked = r.data)).catch(() => {});
+		const check = () => api<Watched[]>('/agents?select=handle,session_state,last_seen_at,active,kind&active=is.true&kind=eq.agent')
+			.then((r) => (blocked = r.data.flatMap((a) =>
+				watcherSilent(a) ? [{ handle: a.handle, problem: `board watcher silent for ${ago(a.last_seen_at).replace(/ ago$/, '')}` }]
+				: sessionBlocked(a) ? [{ handle: a.handle, problem: SESSION_PROBLEM[a.session_state!] }] : [])))
+			.catch(() => {});
 		check();
 		return every(REFRESH_MS, check);
 	});
@@ -61,6 +66,7 @@
 				{/each}
 				{#if session.current.is_admin}
 					<a href="/admin" class:on={active('/admin')}>Admin</a>
+					<a href="/claude" class:on={active('/claude')}>Claude</a>
 				{/if}
 			</nav>
 			<div class="who">
@@ -80,17 +86,24 @@
 
 {#if session.current && blocked.length && !page.url.pathname.startsWith('/agents')}
 	<a class="sessions-alert" href="/agents">
-		{#each blocked as b, i}{i ? ' · ' : ''}<b>{b.handle}</b>: {SESSION_PROBLEM[b.session_state]}{/each}
+		{#each blocked as b, i}{i ? ' · ' : ''}<b>{b.handle}</b>: {b.problem}{/each}
 		— they get no board notifications until this is cleared. Participants →
 	</a>
 {/if}
 
 <!-- the task board is a kanban: give it the whole window width -->
-<main class:wide={page.url.pathname === '/tasks'}>
+<main class:wide={/^\/tasks(\/(todo|doing|blocked|ongoing|review|done|cancelled))?$/.test(page.url.pathname)}>
 	{#if session.current || PUBLIC.includes(page.url.pathname)}
 		{@render children()}
 	{/if}
 </main>
+
+<!-- claude-ui's dock: this agent's chat on every page (launcher -> popup -> pinned side panel);
+     /claude is the same chat full page, so the dock steps aside there -->
+{#if session.current}
+	<ClaudeDock pgrst={API} getToken={() => session.current?.token ?? null} isAdmin={() => !!session.current?.is_admin}
+		hidden={!session.current.is_admin || page.url.pathname.startsWith('/claude')} />
+{/if}
 
 <style>
 	:global {

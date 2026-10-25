@@ -76,13 +76,14 @@ BEGIN
     IF cn > max_lines THEN
         clines := format('[board] %s of your tasks changed status -- list them with: board tasks --mine', cn);
     END IF;
-    -- the PM: open tasks with no activity for their check_every (at most one prompt per check_every), and
-    -- tasks that someone else moved to blocked or review
+    -- the PM: open tasks with no activity for their check_every (at most one prompt per check_every), ongoing
+    -- tasks every check_every whatever their activity, and tasks that someone else moved to blocked or review
     IF me = (SELECT pm FROM board.policy) THEN
         WITH due AS (
             SELECT t.id FROM board.task t
-            WHERE t.status IN ('todo', 'doing', 'blocked', 'review')
-              AND ((t.activity_at < now() - t.check_every AND coalesce(t.pm_prompted_at, '-infinity') < now() - t.check_every)
+            WHERE t.status IN ('todo', 'doing', 'blocked', 'review', 'ongoing')
+              AND (((t.activity_at < now() - t.check_every OR t.status = 'ongoing')
+                    AND coalesce(t.pm_prompted_at, '-infinity') < now() - t.check_every)
                    OR (t.status IN ('blocked', 'review') AND coalesce(t.pm_prompted_at, '-infinity') < t.status_changed_at
                        AND (SELECT n.author FROM board.task_note n WHERE n.task_id = t.id ORDER BY n.id DESC LIMIT 1) <> me))
         ), taken AS (
@@ -92,17 +93,22 @@ BEGIN
                    '[board] task #%s "%s" [%s, @%s]: %s -- check in: board task %s, then nudge the assignee, re-assign/split it, or escalate (board task update %s --human "WHY")',
                    t.id, t.title, t.status, coalesce(t.assignee, 'unassigned'),
                    CASE WHEN t.status IN ('blocked', 'review') AND t.activity_at >= now() - t.check_every
-                        THEN 'moved to ' || t.status ELSE 'no activity for ' || board.fmt_age(now() - t.activity_at) END,
+                        THEN 'moved to ' || t.status
+                        WHEN t.status = 'ongoing'
+                        THEN format('ongoing, %s health check (last activity %s ago): verify that every part in its description is still flowing (fresh numbers from the owners, not the last note)',
+                                    CASE WHEN t.check_every = interval '1 day' THEN 'daily' ELSE 'periodic' END, board.fmt_age(now() - t.activity_at))
+                        ELSE 'no activity for ' || board.fmt_age(now() - t.activity_at) END,
                    t.id, t.id), E'\n' ORDER BY t.id)
         INTO pn, plines
         FROM taken t;
         IF pn > max_lines THEN
             plines := format('[board] %s tasks need a check-in -- list them with: board tasks', pn);
         END IF;
-        -- the hourly sweep over every open task (claimed atomically, so one line per period)
+        -- the hourly sweep over every open task (claimed atomically, so one line per period); relaxed tasks
+        -- (check_every over a day: weekly backups, reviews) are left out and only get their own check-in
         UPDATE board.policy p SET pm_swept_at = now()
         WHERE coalesce(p.pm_swept_at, '-infinity') < now() - p.pm_sweep_every
-          AND EXISTS (SELECT 1 FROM board.task t WHERE t.status NOT IN ('done', 'cancelled')
+          AND EXISTS (SELECT 1 FROM board.task t WHERE t.status NOT IN ('done', 'cancelled') AND t.check_every <= interval '1 day'
                       AND (NOT t.needs_human OR board.task_human_answered(t.id)));
         IF FOUND THEN
             SELECT format('[board] hourly task sweep, %s open: %s -- for each: board task N (and its threads), judge whether it is moving toward done; if not, nudge whoever can advance it (assignee, or the agent it waits on) with ONE direct message filed under the task, re-assign/split, or escalate (--human). Skip tasks that are moving; note what you checked.',
@@ -111,7 +117,8 @@ BEGIN
                                                       CASE WHEN t.needs_human THEN ' (HUMAN ANSWERED: act on it, then clear --no-human)' ELSE '' END),
                                                ', ' ORDER BY t.needs_human DESC, t.activity_at))
             INTO swline
-            FROM board.task t WHERE t.status NOT IN ('done', 'cancelled') AND (NOT t.needs_human OR board.task_human_answered(t.id));
+            FROM board.task t WHERE t.status NOT IN ('done', 'cancelled') AND t.check_every <= interval '1 day'
+              AND (NOT t.needs_human OR board.task_human_answered(t.id));
             plines := concat_ws(E'\n', plines, swline);
         END IF;
     END IF;

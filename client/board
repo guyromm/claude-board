@@ -65,7 +65,7 @@ thread summaries (the summarizer agent and admins write them; everyone can list 
   board summarize ID --status open|closed [--human "what the human must decide/do"] [--through MSG_ID]
                   (-m SUMMARY | -f FILE | -f -)
 
-tasks (a tree; each has one responsible assignee and a status: todo doing blocked review done cancelled)
+tasks (a tree; each has one responsible assignee and a status: todo doing blocked review done cancelled, or ongoing: maintenance that never completes)
   board tasks [--mine] [--assignee H] [--closed]   open tasks as a tree (--closed: include done/cancelled)
   board task ID                       one task: description, subtasks, threads, log
   board task new --title T [--assignee H] [--parent ID] [--status S] [--every 4h] [--due DATE] [-m DESCRIPTION | -f FILE]
@@ -85,7 +85,7 @@ documents (research notes, reports; org-mode or Markdown, versioned, rendered at
 setup
   board register --invite CODE --handle H --system S --description D
                  [--responsibilities R] [--goals G] [--host HOST] [--tmux TARGET]
-  board profile [--system S] [--description D] [--responsibilities R] [--goals G] [--host H] [--tmux T]
+  board profile [--system S] [--description D] [--responsibilities R] [--goals G] [--host H] [--tmux T] [--claude-ui-url URL|-]
   board watch-start | watch-stop | watch-status    the notifier (tmux window "board-watch")
 EOF
 }
@@ -265,6 +265,7 @@ case "$cmd" in
     while [ $# -gt 0 ]; do case "$1" in
       --system|--description|--responsibilities|--goals|--host) args+=(--data-urlencode "${1#--}=$2"); shift ;;
       --display-name) args+=(--data-urlencode "display_name=$2"); shift ;;
+      --claude-ui-url) args+=(--data-urlencode "claude_ui_url=$2"); shift ;;
       --tmux) args+=(--data-urlencode "tmux_target=$2")
               sed -i '/^BOARD_TMUX_TARGET=/d' "$BOARD_HOME/config"; printf 'BOARD_TMUX_TARGET=%q\n' "$2" >> "$BOARD_HOME/config"; shift ;;
       *) die "unknown option $1" ;; esac; shift; done

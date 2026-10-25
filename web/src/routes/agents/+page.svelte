@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { api, ago, session, sessionBlocked, SESSION_PROBLEM, type Agent } from '#lib/api.svelte.ts';
+	import { api, ago, session, sessionBlocked, watcherSilent, SESSION_PROBLEM, type Agent } from '#lib/api.svelte.ts';
 	import LoginPanel from '#lib/LoginPanel.svelte';
 	import { every, REFRESH_MS } from '#lib/poll.ts';
 
@@ -14,10 +14,12 @@
 	const load = () => api<Agent[]>('/agents?order=kind.desc,handle').then((r) => (agents = r.data)).catch((e) => (error = e.message));
 	$effect(() => { load(); return every(REFRESH_MS, load); });
 	const loggedOut = (a: Agent) => sessionBlocked(a);
+	const silent = (a: Agent) => watcherSilent(a);
+	const needsHuman = (a: Agent) => loggedOut(a) || silent(a);
 
 	// blocked sessions (logged out, dialog open, no Claude) first: they are what the human has to act on
 	const shown = $derived(
-		[...agents].sort((a, b) => Number(loggedOut(b)) - Number(loggedOut(a))).filter((a) =>
+		[...agents].sort((a, b) => Number(needsHuman(b)) - Number(needsHuman(a))).filter((a) =>
 			!filter || [a.handle, a.system, a.host, a.description, a.responsibilities].join(' ').toLowerCase().includes(filter.toLowerCase())
 		)
 	);
@@ -34,7 +36,7 @@
 
 <div class="cards">
 	{#each shown as a (a.handle)}
-		<article class="panel" class:inactive={!a.active} class:out={loggedOut(a)}>
+		<article class="panel" class:inactive={!a.active} class:out={needsHuman(a)}>
 			<header>
 				<span class="status" class:on={online(a)} title={online(a) ? 'watcher online' : `last seen ${ago(a.last_seen_at)}`}></span>
 				<a class="mono handle" href="/?involving={a.handle}">{a.handle}</a>
@@ -43,11 +45,16 @@
 				{#if !a.active}<span class="chip sys">inactive</span>{/if}
 				{#if a.watcher_version}<span class="muted ver" title="watcher version">watcher v{a.watcher_version}</span>{/if}
 			</header>
+			{#if silent(a)}
+				<div class="loggedout">Watcher silent {a.last_seen_at ? `for ${ago(a.last_seen_at).replace(/ ago$/, '')}` : '(never seen)'}
+					<div class="muted small">No poll from its board watcher in over 10 minutes: it gets no board notifications. On its host: <span class="mono">board watch-status</span>, then <span class="mono">board watch-start</span>.</div></div>
+			{/if}
 			{#if loggedOut(a)}
 				<div class="loggedout">{SESSION_PROBLEM[a.session_state ?? '']} <span class="muted">· {ago(a.session_changed_at)}</span>
 					{#if a.session_state === 'needs_input'}<div class="muted small">Answer it in the agent's tmux pane. Until then the agent gets no notifications.</div>{/if}
 					{#if a.session_detail}<div class="detail mono">{a.session_state === 'needs_input' ? a.session_detail.replaceAll(' / ', '\n') : a.session_detail}</div>{/if}</div>
 			{/if}
+			{#if a.claude_ui_url}<a class="cui" href={a.claude_ui_url} target="_blank" rel="noopener" title="the agent's claude-ui: its Claude session in the browser">Claude UI ↗ <span class="mono">{a.claude_ui_url.replace(/^https?:\/\//, '')}</span></a>{/if}
 			<div class="sub muted">
 				{#if a.system}<a href="/?system={a.system.toLowerCase()}">{a.system}</a>{/if}
 				{#if a.host}· <span class="mono">{a.host}</span>{/if}
@@ -88,6 +95,10 @@
 	.status { width: 9px; height: 9px; border-radius: 50%; background: var(--line); flex: none; }
 	.status.on { background: #22a06b; }
 	.sub { font-size: 0.82rem; }
+	.cui { align-self: flex-start; display: inline-flex; gap: 0.45rem; align-items: baseline; padding: 0.3rem 0.65rem; border-radius: 6px;
+		background: var(--accent); color: var(--accent-ink); font-weight: 600; font-size: 0.85rem; text-decoration: none; max-width: 100%; }
+	.cui:hover { filter: brightness(1.1); }
+	.cui .mono { font-weight: 400; font-size: 0.75rem; opacity: 0.85; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 	p { margin: 0; font-size: 0.88rem; white-space: pre-wrap; }
 	p.clamp { display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 	.more { align-self: flex-start; font-size: 0.8rem; }

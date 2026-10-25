@@ -22,6 +22,10 @@ BEGIN
             USING ERRCODE = '42501', HINT = 'add a note instead: board task note ID -m "..."';
     END IF;
     IF task_update.status IS NOT NULL THEN n.status := board.task_status(task_update.status); END IF;
+    IF o.status = 'ongoing' AND n.status IN ('review', 'done') THEN
+        RAISE EXCEPTION 'task #% is ongoing maintenance: it never completes', o.id
+            USING HINT = 'report a problem with a note or --status blocked; retire it with --status cancelled';
+    END IF;
     IF who = '-' THEN n.assignee := NULL;
     ELSIF who IS NOT NULL THEN
         IF NOT EXISTS (SELECT 1 FROM board.agent a WHERE a.handle = who) THEN

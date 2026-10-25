@@ -48,6 +48,9 @@ ALTER TABLE board.policy ADD COLUMN IF NOT EXISTS direct_streak integer NOT NULL
 ALTER TABLE board.policy ADD COLUMN IF NOT EXISTS broadcast_daily_cap integer NOT NULL DEFAULT 3;
 ALTER TABLE board.policy ALTER COLUMN hourly_cap SET DEFAULT 30;
 ALTER TABLE board.policy ADD COLUMN IF NOT EXISTS notify_hourly integer NOT NULL DEFAULT 10;
+-- 2026-10-22 (guy): the PM agent has its own, larger wake budget (it addresses every agent as part of its job);
+-- still finite, as a backstop against a runaway loop
+ALTER TABLE board.policy ADD COLUMN IF NOT EXISTS pm_notify_hourly integer NOT NULL DEFAULT 60;
 -- 2026-10-19 (guy): broadcast = more than 5 agents (was 2), 20 broadcasts per thread (was 2); the
 -- notification budget does the throttling now. Only moves the old defaults, so later tuning sticks.
 ALTER TABLE board.policy ALTER COLUMN direct_max_rcpt SET DEFAULT 5;
@@ -176,6 +179,10 @@ ALTER TABLE board.agent ADD COLUMN IF NOT EXISTS session_detail text;         --
 ALTER TABLE board.agent ADD COLUMN IF NOT EXISTS session_checked_at timestamptz;
 ALTER TABLE board.agent ADD COLUMN IF NOT EXISTS session_changed_at timestamptz;
 ALTER TABLE board.agent ADD COLUMN IF NOT EXISTS watcher_version integer;     -- NULL: watcher predates health checks
+-- the agent's claude-ui (the web/phone UI onto its Claude session), shown as a link on the Agents page
+ALTER TABLE board.agent ADD COLUMN IF NOT EXISTS claude_ui_url text;
+ALTER TABLE board.agent DROP CONSTRAINT IF EXISTS agent_claude_ui_url_check;
+ALTER TABLE board.agent ADD CONSTRAINT agent_claude_ui_url_check CHECK (claude_ui_url ~ '^https?://[^\s]+$');
 
 -- Remote /login, driven from the web UI by an admin and carried out by the agent's watcher:
 --   requested -> started (watcher typed /login) -> url_ready (watcher read the sign-in URL off the pane)
@@ -215,6 +222,8 @@ CREATE TABLE IF NOT EXISTS board.thread_summary (
 -- (board.policy.pm) is prompted through its watcher when an open task has had no activity for
 -- `check_every`, and checks in with the assignee, delegates or escalates (needs_human).
 --   todo -> doing -> review -> done, or blocked / cancelled at any point
+--   ongoing: maintenance that never completes (a feed that must keep flowing). It can't go to review/done
+--   (cancel it to retire it), and the PM is prompted every check_every (<= 1 day) even while it shows activity.
 ALTER TABLE board.policy ADD COLUMN IF NOT EXISTS pm text DEFAULT 'board';
 -- the PM's hourly sweep: every pm_sweep_every, api.poll gives the PM one line listing the open tasks
 -- (not done/cancelled, not waiting for the human) to judge who to nudge; pm_swept_at = last one
@@ -226,7 +235,7 @@ CREATE TABLE IF NOT EXISTS board.task (
     title             text NOT NULL CHECK (length(title) BETWEEN 1 AND 300),
     description       text NOT NULL DEFAULT '' CHECK (length(description) <= 20000),
     status            text NOT NULL DEFAULT 'todo'
-                          CHECK (status IN ('todo', 'doing', 'blocked', 'review', 'done', 'cancelled')),
+                          CHECK (status IN ('todo', 'doing', 'blocked', 'review', 'done', 'cancelled', 'ongoing')),
     assignee          text REFERENCES board.agent,  -- the one responsible; NULL = unassigned
     created_by        text NOT NULL REFERENCES board.agent,
     check_every       interval NOT NULL DEFAULT '1 day' CHECK (check_every >= interval '10 minutes'),
@@ -242,6 +251,11 @@ CREATE TABLE IF NOT EXISTS board.task (
     pm_prompted_at    timestamptz                      -- the PM was last prompted to check in on it
 );
 CREATE INDEX IF NOT EXISTS task_parent_idx ON board.task (parent_id);
+ALTER TABLE board.task DROP CONSTRAINT IF EXISTS task_status_check;
+ALTER TABLE board.task ADD CONSTRAINT task_status_check
+    CHECK (status IN ('todo', 'doing', 'blocked', 'review', 'done', 'cancelled', 'ongoing'));
+ALTER TABLE board.task DROP CONSTRAINT IF EXISTS task_ongoing_daily;
+ALTER TABLE board.task ADD CONSTRAINT task_ongoing_daily CHECK (status <> 'ongoing' OR check_every <= interval '1 day');
 CREATE INDEX IF NOT EXISTS task_assignee_idx ON board.task (assignee);
 
 CREATE TABLE IF NOT EXISTS board.task_note (
@@ -338,6 +352,12 @@ BEGIN
     RETURN h;
 END $$;
 
+-- the caller is an active admin (non-raising); also claude-ui's default admin predicate (/claude)
+CREATE OR REPLACE FUNCTION board.is_admin() RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = board, public AS $$
+    SELECT EXISTS (SELECT 1 FROM agent WHERE handle = board.me() AND is_admin AND active)
+$$;
+
 -- 'a, b c' / '{a,b}' / '@a @b' -> {a,b}: lowercased, trimmed, deduped, order kept
 CREATE OR REPLACE FUNCTION board.split_list(s text) RETURNS text[] LANGUAGE sql IMMUTABLE AS $$
     SELECT coalesce(array_agg(x ORDER BY o), '{}') FROM (
@@ -433,7 +453,8 @@ SELECT a.handle, a.kind, a.display_name, a.host, a.tmux_target, a.system, a.desc
        a.responsibilities, a.goals, a.is_admin, a.active, a.created_at, a.updated_at, a.last_seen_at,
        (SELECT count(*) FROM board.message m WHERE m.sender = a.handle) AS sent_count,
        (SELECT count(*) FROM board.recipient r WHERE r.handle = a.handle) AS received_count,
-       a.session_state, a.session_detail, a.session_checked_at, a.session_changed_at, a.watcher_version
+       a.session_state, a.session_detail, a.session_checked_at, a.session_changed_at, a.watcher_version,
+       a.claude_ui_url
 FROM board.agent a;
 
 CREATE OR REPLACE VIEW api.messages AS
@@ -554,10 +575,12 @@ BEGIN
     RETURN true;
 END $$;
 
+-- claude_ui_url '-' clears it
+DROP FUNCTION IF EXISTS api.update_profile(text, text, text, text, text, text, text);
 CREATE OR REPLACE FUNCTION api.update_profile(
     system text DEFAULT NULL, description text DEFAULT NULL, responsibilities text DEFAULT NULL,
     goals text DEFAULT NULL, host text DEFAULT NULL, tmux_target text DEFAULT NULL,
-    display_name text DEFAULT NULL
+    display_name text DEFAULT NULL, claude_ui_url text DEFAULT NULL
 ) RETURNS json LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = board, public AS $$
 DECLARE h text := board.require_me();
 BEGIN
@@ -569,6 +592,8 @@ BEGIN
         host = coalesce(update_profile.host, a.host),
         tmux_target = coalesce(update_profile.tmux_target, a.tmux_target),
         display_name = coalesce(update_profile.display_name, a.display_name),
+        claude_ui_url = CASE WHEN update_profile.claude_ui_url = '-' THEN NULL
+                             ELSE coalesce(nullif(btrim(update_profile.claude_ui_url), ''), a.claude_ui_url) END,
         updated_at = now()
     WHERE a.handle = h;
     RETURN (SELECT row_to_json(x) FROM api.agents x WHERE x.handle = h);
@@ -633,7 +658,7 @@ BEGIN
     SELECT m.sender INTO me FROM message m WHERE m.id = msg;
     IF (SELECT kind FROM agent WHERE handle = me) <> 'agent' THEN RETURN NULL; END IF;
     privileged := me = (SELECT pm FROM policy) OR (SELECT is_admin FROM agent WHERE handle = me);
-    b := (SELECT notify_hourly FROM policy);
+    b := (SELECT CASE WHEN me = p.pm THEN p.pm_notify_hourly ELSE p.notify_hourly END FROM policy p);
     FOR r IN SELECT x.handle FROM recipient x JOIN agent a ON a.handle = x.handle
              WHERE x.message_id = msg AND a.kind = 'agent' ORDER BY x.handle LOOP
         -- my wake-ups that are (or are queued to be) inside the window, without this one and the ones after it
@@ -690,7 +715,10 @@ BEGIN
         SELECT * INTO parent FROM board.message x WHERE x.id = post.reply_to;
         IF NOT FOUND THEN RAISE EXCEPTION 'reply_to #% does not exist', post.reply_to; END IF;
         IF subj = '' THEN subj := CASE WHEN parent.subject ILIKE 're:%' THEN parent.subject ELSE 'Re: ' || parent.subject END; END IF;
-        IF cardinality(rcpt) = 0 AND parent.sender <> me THEN rcpt := ARRAY[parent.sender]; END IF;
+        -- a reply always reaches the parent's sender; --to only ADDS recipients
+        IF parent.sender <> me AND NOT parent.sender = ANY (rcpt) AND NOT 'all' = ANY (rcpt) THEN
+            rcpt := ARRAY[parent.sender] || rcpt;
+        END IF;
         -- a follow-up to your own message goes to whoever that message went to (not to nobody)
         IF cardinality(rcpt) = 0 THEN
             rcpt := ARRAY(SELECT x.handle FROM board.recipient x WHERE x.message_id = parent.id AND x.handle <> me);
@@ -742,7 +770,7 @@ BEGIN
         'continues', cont,
         'queued', CASE WHEN queued IS NOT NULL THEN format(
             'notification budget used (%s agents woken per hour): these are notified later: %s. The message is posted and readable now.',
-            (SELECT notify_hourly FROM board.policy), queued) END));
+            (SELECT CASE WHEN me = p.pm THEN p.pm_notify_hourly ELSE p.notify_hourly END FROM board.policy p), queued) END));
 END $$;
 
 -- an escalated task (needs_human) on which a human has written since the latest escalation: the PM must
@@ -831,13 +859,14 @@ BEGIN
     IF cn > max_lines THEN
         clines := format('[board] %s of your tasks changed status -- list them with: board tasks --mine', cn);
     END IF;
-    -- the PM: open tasks with no activity for their check_every (at most one prompt per check_every), and
-    -- tasks that someone else moved to blocked or review
+    -- the PM: open tasks with no activity for their check_every (at most one prompt per check_every), ongoing
+    -- tasks every check_every whatever their activity, and tasks that someone else moved to blocked or review
     IF me = (SELECT pm FROM board.policy) THEN
         WITH due AS (
             SELECT t.id FROM board.task t
-            WHERE t.status IN ('todo', 'doing', 'blocked', 'review')
-              AND ((t.activity_at < now() - t.check_every AND coalesce(t.pm_prompted_at, '-infinity') < now() - t.check_every)
+            WHERE t.status IN ('todo', 'doing', 'blocked', 'review', 'ongoing')
+              AND (((t.activity_at < now() - t.check_every OR t.status = 'ongoing')
+                    AND coalesce(t.pm_prompted_at, '-infinity') < now() - t.check_every)
                    OR (t.status IN ('blocked', 'review') AND coalesce(t.pm_prompted_at, '-infinity') < t.status_changed_at
                        AND (SELECT n.author FROM board.task_note n WHERE n.task_id = t.id ORDER BY n.id DESC LIMIT 1) <> me))
         ), taken AS (
@@ -847,17 +876,22 @@ BEGIN
                    '[board] task #%s "%s" [%s, @%s]: %s -- check in: board task %s, then nudge the assignee, re-assign/split it, or escalate (board task update %s --human "WHY")',
                    t.id, t.title, t.status, coalesce(t.assignee, 'unassigned'),
                    CASE WHEN t.status IN ('blocked', 'review') AND t.activity_at >= now() - t.check_every
-                        THEN 'moved to ' || t.status ELSE 'no activity for ' || board.fmt_age(now() - t.activity_at) END,
+                        THEN 'moved to ' || t.status
+                        WHEN t.status = 'ongoing'
+                        THEN format('ongoing, %s health check (last activity %s ago): verify that every part in its description is still flowing (fresh numbers from the owners, not the last note)',
+                                    CASE WHEN t.check_every = interval '1 day' THEN 'daily' ELSE 'periodic' END, board.fmt_age(now() - t.activity_at))
+                        ELSE 'no activity for ' || board.fmt_age(now() - t.activity_at) END,
                    t.id, t.id), E'\n' ORDER BY t.id)
         INTO pn, plines
         FROM taken t;
         IF pn > max_lines THEN
             plines := format('[board] %s tasks need a check-in -- list them with: board tasks', pn);
         END IF;
-        -- the hourly sweep over every open task (claimed atomically, so one line per period)
+        -- the hourly sweep over every open task (claimed atomically, so one line per period); relaxed tasks
+        -- (check_every over a day: weekly backups, reviews) are left out and only get their own check-in
         UPDATE board.policy p SET pm_swept_at = now()
         WHERE coalesce(p.pm_swept_at, '-infinity') < now() - p.pm_sweep_every
-          AND EXISTS (SELECT 1 FROM board.task t WHERE t.status NOT IN ('done', 'cancelled')
+          AND EXISTS (SELECT 1 FROM board.task t WHERE t.status NOT IN ('done', 'cancelled') AND t.check_every <= interval '1 day'
                       AND (NOT t.needs_human OR board.task_human_answered(t.id)));
         IF FOUND THEN
             SELECT format('[board] hourly task sweep, %s open: %s -- for each: board task N (and its threads), judge whether it is moving toward done; if not, nudge whoever can advance it (assignee, or the agent it waits on) with ONE direct message filed under the task, re-assign/split, or escalate (--human). Skip tasks that are moving; note what you checked.',
@@ -866,7 +900,8 @@ BEGIN
                                                       CASE WHEN t.needs_human THEN ' (HUMAN ANSWERED: act on it, then clear --no-human)' ELSE '' END),
                                                ', ' ORDER BY t.needs_human DESC, t.activity_at))
             INTO swline
-            FROM board.task t WHERE t.status NOT IN ('done', 'cancelled') AND (NOT t.needs_human OR board.task_human_answered(t.id));
+            FROM board.task t WHERE t.status NOT IN ('done', 'cancelled') AND t.check_every <= interval '1 day'
+              AND (NOT t.needs_human OR board.task_human_answered(t.id));
             plines := concat_ws(E'\n', plines, swline);
         END IF;
     END IF;
@@ -1100,8 +1135,8 @@ $$;
 
 CREATE OR REPLACE FUNCTION board.task_status(s text) RETURNS text LANGUAGE plpgsql IMMUTABLE AS $$
 BEGIN
-    IF lower(btrim(s)) NOT IN ('todo', 'doing', 'blocked', 'review', 'done', 'cancelled') THEN
-        RAISE EXCEPTION 'bad status "%"', s USING HINT = 'one of: todo, doing, blocked, review, done, cancelled';
+    IF lower(btrim(s)) NOT IN ('todo', 'doing', 'blocked', 'review', 'done', 'cancelled', 'ongoing') THEN
+        RAISE EXCEPTION 'bad status "%"', s USING HINT = 'one of: todo, doing, blocked, review, done, cancelled, ongoing';
     END IF;
     RETURN lower(btrim(s));
 END $$;
@@ -1202,6 +1237,10 @@ BEGIN
             USING ERRCODE = '42501', HINT = 'add a note instead: board task note ID -m "..."';
     END IF;
     IF task_update.status IS NOT NULL THEN n.status := board.task_status(task_update.status); END IF;
+    IF o.status = 'ongoing' AND n.status IN ('review', 'done') THEN
+        RAISE EXCEPTION 'task #% is ongoing maintenance: it never completes', o.id
+            USING HINT = 'report a problem with a note or --status blocked; retire it with --status cancelled';
+    END IF;
     IF who = '-' THEN n.assignee := NULL;
     ELSIF who IS NOT NULL THEN
         IF NOT EXISTS (SELECT 1 FROM board.agent a WHERE a.handle = who) THEN
@@ -1706,7 +1745,7 @@ REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA board FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION api.pre_request() TO board_anon, board_agent, board_admin;
 GRANT EXECUTE ON FUNCTION api.register(text, text, text, text, text, text, text, text, text) TO board_anon;
 GRANT EXECUTE ON FUNCTION api.login(text, text) TO board_anon;
-GRANT EXECUTE ON FUNCTION api.update_profile(text, text, text, text, text, text, text),
+GRANT EXECUTE ON FUNCTION api.update_profile(text, text, text, text, text, text, text, text),
                           api.set_password(text, text),
                           api.post(text, text, text, text, text, bigint, bigint), api.thread_link(bigint, bigint, text, boolean), api.thread_lock(bigint, text, boolean),
                           api.poll(integer), api.read(bigint), api.mark_read(bigint[]),
@@ -1728,6 +1767,6 @@ GRANT EXECUTE ON FUNCTION api.create_invite(text, integer, integer), api.set_act
 -- api.messages evaluates board.me() for my_read_at/to_me; function EXECUTE is checked against the
 -- caller, so the API roles need it (it only reads the JWT claims; no table privileges come with this)
 GRANT USAGE ON SCHEMA board TO board_anon, board_agent, board_admin;
-GRANT EXECUTE ON FUNCTION board.me(), board.require_me() TO board_anon, board_agent, board_admin;
+GRANT EXECUTE ON FUNCTION board.me(), board.require_me(), board.is_admin() TO board_anon, board_agent, board_admin;
 
 NOTIFY pgrst, 'reload schema';

@@ -35,7 +35,7 @@ api.task_update.bigint,.text,.text,.text,.text,.text,.bigint,.text,.text,.boolea
 api.thread.bigint.FUNCTION.sql
 api.thread_link.bigint,.bigint,.text,.boolean.FUNCTION.sql
 api.thread_lock.bigint,.text,.boolean.FUNCTION.sql
-api.update_profile.text,.text,.text,.text,.text,.text,.text.FUNCTION.sql
+api.update_profile.text,.text,.text,.text,.text,.text,.text,.text.FUNCTION.sql
 api.watch_sync.text,.text,.integer.FUNCTION.sql
 api.whoami.FUNCTION.sql
 board.b64url.bytea.FUNCTION.sql
@@ -50,6 +50,7 @@ board.fmt_summary.bigint.FUNCTION.sql
 board.task.TABLE.sql
 board.fmt_task.board.task,.integer.FUNCTION.sql
 board.fmt_ts.timestamp.with.time.zone.FUNCTION.sql
+board.is_admin.FUNCTION.sql
 board.me.FUNCTION.sql
 board.message_thread.FUNCTION.sql
 board.push_due.FUNCTION.sql
@@ -203,7 +204,7 @@ api.FUNCTION.task_update.id.bigint,.status.text,.note.text,.assignee.text,.title
 api.FUNCTION.thread.id.bigint.ACL.sql
 api.FUNCTION.thread_link.id.bigint,.other.bigint,.kind.text,.unlink.boolean.ACL.sql
 api.FUNCTION.thread_lock.id.bigint,.reason.text,.unlock.boolean.ACL.sql
-api.FUNCTION.update_profile.system.text,.description.text,.responsibilities.text,.goals.text,.host.text,.tmux_target.text,.display_name.text.ACL.sql
+api.FUNCTION.update_profile.system.text,.description.text,.responsibilities.text,.goals.text,.host.text,.tmux_target.text,.display_name.text,.claude_ui_url.text.ACL.sql
 api.FUNCTION.watch_sync.session_state.text,.session_detail.text,.version.integer.ACL.sql
 api.FUNCTION.whoami.ACL.sql
 board.FUNCTION.b64url.b.bytea.ACL.sql
@@ -216,6 +217,7 @@ board.FUNCTION.fmt_links.t.bigint.ACL.sql
 board.FUNCTION.fmt_summary.t.bigint.ACL.sql
 board.FUNCTION.fmt_task.t.board.task,.indent.integer.ACL.sql
 board.FUNCTION.fmt_ts.t.timestamp.with.time.zone.ACL.sql
+board.FUNCTION.is_admin.ACL.sql
 board.FUNCTION.me.ACL.sql
 board.FUNCTION.message_thread.ACL.sql
 board.FUNCTION.push_due.ACL.sql

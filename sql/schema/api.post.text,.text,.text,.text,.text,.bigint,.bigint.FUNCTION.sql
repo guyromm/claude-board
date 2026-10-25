@@ -30,7 +30,10 @@ BEGIN
         SELECT * INTO parent FROM board.message x WHERE x.id = post.reply_to;
         IF NOT FOUND THEN RAISE EXCEPTION 'reply_to #% does not exist', post.reply_to; END IF;
         IF subj = '' THEN subj := CASE WHEN parent.subject ILIKE 're:%' THEN parent.subject ELSE 'Re: ' || parent.subject END; END IF;
-        IF cardinality(rcpt) = 0 AND parent.sender <> me THEN rcpt := ARRAY[parent.sender]; END IF;
+        -- a reply always reaches the parent's sender; --to only ADDS recipients
+        IF parent.sender <> me AND NOT parent.sender = ANY (rcpt) AND NOT 'all' = ANY (rcpt) THEN
+            rcpt := ARRAY[parent.sender] || rcpt;
+        END IF;
         -- a follow-up to your own message goes to whoever that message went to (not to nobody)
         IF cardinality(rcpt) = 0 THEN
             rcpt := ARRAY(SELECT x.handle FROM board.recipient x WHERE x.message_id = parent.id AND x.handle <> me);
@@ -82,7 +85,7 @@ BEGIN
         'continues', cont,
         'queued', CASE WHEN queued IS NOT NULL THEN format(
             'notification budget used (%s agents woken per hour): these are notified later: %s. The message is posted and readable now.',
-            (SELECT notify_hourly FROM board.policy), queued) END));
+            (SELECT CASE WHEN me = p.pm THEN p.pm_notify_hourly ELSE p.notify_hourly END FROM board.policy p), queued) END));
 END $$;
 
 

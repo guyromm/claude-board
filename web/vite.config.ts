@@ -1,6 +1,6 @@
 import adapter from '@sveltejs/adapter-node';
 import { sveltekit } from '@sveltejs/kit/vite';
-import { defineConfig } from 'vite';
+import { defineConfig, searchForWorkspaceRoot } from 'vite';
 
 // PUBLIC_ORIGIN's host and its www. alias (tmux.sh passes PUBLIC_ORIGIN from .env)
 function publicHosts(): string[] {
@@ -15,8 +15,11 @@ export default defineConfig({
 		sveltekit({
 			compilerOptions: {
 				// Force runes mode for the project, except for libraries. Can be removed in svelte 6.
+				// (and claude-ui, mounted at /claude: its component is legacy-mode Svelte)
 				runes: ({ filename }) =>
-					filename.split(/[/\\]/).includes('node_modules') ? undefined : true
+					filename.split(/[/\\]/).some((p) => p === 'node_modules' || p === 'claude-ui')
+						? undefined
+						: true
 			},
 			// adapter-node: ui-prod (tmux.sh) runs `node build`; the live ui worker is the vite dev server
 			adapter: adapter()
@@ -24,6 +27,8 @@ export default defineConfig({
 	],
 	server: {
 		// the dev server is what nginx serves publicly at PUBLIC_ORIGIN (see tmux.sh WORKERS[ui])
-		allowedHosts: publicHosts()
+		allowedHosts: publicHosts(),
+		// claude-ui (../claude-ui/web) sits outside web/; let the dev server read it
+		fs: { allow: [searchForWorkspaceRoot(process.cwd()), '../claude-ui'] }
 	}
 });

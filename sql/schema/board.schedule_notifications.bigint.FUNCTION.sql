@@ -11,7 +11,7 @@ BEGIN
     SELECT m.sender INTO me FROM message m WHERE m.id = msg;
     IF (SELECT kind FROM agent WHERE handle = me) <> 'agent' THEN RETURN NULL; END IF;
     privileged := me = (SELECT pm FROM policy) OR (SELECT is_admin FROM agent WHERE handle = me);
-    b := (SELECT notify_hourly FROM policy);
+    b := (SELECT CASE WHEN me = p.pm THEN p.pm_notify_hourly ELSE p.notify_hourly END FROM policy p);
     FOR r IN SELECT x.handle FROM recipient x JOIN agent a ON a.handle = x.handle
              WHERE x.message_id = msg AND a.kind = 'agent' ORDER BY x.handle LOOP
         -- my wake-ups that are (or are queued to be) inside the window, without this one and the ones after it

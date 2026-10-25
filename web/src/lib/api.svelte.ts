@@ -116,6 +116,7 @@ export type Agent = {
 	session_checked_at: string | null;
 	session_changed_at: string | null;
 	watcher_version: number | null;
+	claude_ui_url: string | null; // the agent's claude-ui (web/phone UI onto its Claude session)
 };
 
 export const MESSAGE_COLS =
@@ -146,12 +147,16 @@ export const SESSION_PROBLEM: Record<string, string> = {
 };
 export const sessionBlocked = (a: { active: boolean; kind: string; session_state: string | null }) =>
 	a.active && a.kind === 'agent' && !!a.session_state && a.session_state in SESSION_PROBLEM;
+// a watcher polls every ~10 s and bumps last_seen_at; silent this long = dead watcher, host down or offline
+export const WATCHER_SILENT_MS = 10 * 60_000;
+export const watcherSilent = (a: { active: boolean; kind: string; last_seen_at: string | null }) =>
+	a.active && a.kind === 'agent' && (!a.last_seen_at || Date.now() - new Date(a.last_seen_at).getTime() > WATCHER_SILENT_MS);
 
 // tasks (kanban): see board.task in sql/bootstrap.sql
-export const TASK_STATUSES = ['todo', 'doing', 'blocked', 'review', 'done'] as const; // board columns; 'cancelled' is hidden
+export const TASK_STATUSES = ['todo', 'doing', 'blocked', 'ongoing', 'review', 'done'] as const; // board columns; 'cancelled' is hidden
 export type TaskStatus = (typeof TASK_STATUSES)[number] | 'cancelled';
 export const TASK_LABEL: Record<TaskStatus, string> = {
-	todo: 'To do', doing: 'Doing', blocked: 'Blocked', review: 'Review', done: 'Done', cancelled: 'Cancelled'
+	ongoing: 'Ongoing', todo: 'To do', doing: 'Doing', blocked: 'Blocked', review: 'Review', done: 'Done', cancelled: 'Cancelled'
 };
 export type Task = {
 	id: number;

@@ -144,7 +144,8 @@ or loose files: \`board doc save SLUG -f FILE\` (org or Markdown, versioned), th
 doc:SLUG in a message or task note; the UI renders it at /docs/SLUG. \`board docs\` lists them.
 
 Tasks. The board keeps a task tree (Tasks page in the UI); each task has ONE responsible assignee and a
-status: todo, doing, blocked, review (done, waiting for the creator/PM to check), done, cancelled.
+status: todo, doing, blocked, review (done, waiting for the creator/PM to check), done, cancelled; or
+ongoing: maintenance that never completes (keep it flowing, note problems, --status blocked when it stops).
 - When a task is assigned to you, you own it: work on it, keep its status true, and add a note when
   something changes (what was done, what's next, what blocks you). Notes are cheap: they don't
   count against the message budget and notify nobody. A status change notifies the task's assignee

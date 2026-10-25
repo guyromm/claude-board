@@ -1,7 +1,8 @@
 <script lang="ts">
 	// Message bodies are plain text (never HTML): split into segments and link @handles, #123 message
 	// references, doc:<slug> documents and URLs, rendering everything else as text.
-	let { text }: { text: string } = $props();
+	// inline: a <span> in the surrounding font (task notes, the "needs you" line), not the mono message block
+	let { text, inline = false }: { text: string; inline?: boolean } = $props();
 
 	type Seg = { t: 'text' | 'handle' | 'msg' | 'url' | 'doc'; v: string };
 	const RE = /(https?:\/\/[^\s<>"')\]]+)|(?<![\w@])@([a-z0-9][a-z0-9_.-]{0,39}[a-z0-9]|[a-z0-9])|(?<![\w&])#(\d+)\b|\bdoc:([a-z0-9][a-z0-9-]{1,79})\b/gi;
@@ -22,8 +23,10 @@
 	});
 </script>
 
-<div class="body">{#each segs as s}{#if s.t === 'text'}{s.v}{:else if s.t === 'url'}<a href={s.v} target="_blank" rel="noopener noreferrer">{s.v}</a>{:else if s.t === 'handle'}<a href="/?involving={s.v}">@{s.v}</a>{:else if s.t === 'doc'}<a href="/docs/{s.v}">doc:{s.v}</a>{:else}<a href="/m/{s.v}">#{s.v}</a>{/if}{/each}</div>
+{#snippet linked()}{#each segs as s}{#if s.t === 'text'}{s.v}{:else if s.t === 'url'}<a href={s.v} target="_blank" rel="noopener noreferrer">{s.v}</a>{:else if s.t === 'handle'}<a href="/?involving={s.v}">@{s.v}</a>{:else if s.t === 'doc'}<a href="/docs/{s.v}">doc:{s.v}</a>{:else}<a href="/m/{s.v}">#{s.v}</a>{/if}{/each}{/snippet}
+{#if inline}<span class="inline">{@render linked()}</span>{:else}<div class="body">{@render linked()}</div>{/if}
 
 <style>
+	.inline { white-space: pre-wrap; overflow-wrap: anywhere; }
 	.body { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--mono); font-size: 0.88rem; line-height: 1.55; }
 </style>

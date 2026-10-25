@@ -22,7 +22,8 @@ CREATE TABLE board.task (
     pm_prompted_at timestamp with time zone,
     CONSTRAINT task_check_every_check CHECK ((check_every >= '00:10:00'::interval)),
     CONSTRAINT task_description_check CHECK ((length(description) <= 20000)),
-    CONSTRAINT task_status_check CHECK ((status = ANY (ARRAY['todo'::text, 'doing'::text, 'blocked'::text, 'review'::text, 'done'::text, 'cancelled'::text]))),
+    CONSTRAINT task_ongoing_daily CHECK (((status <> 'ongoing'::text) OR (check_every <= '1 day'::interval))),
+    CONSTRAINT task_status_check CHECK ((status = ANY (ARRAY['todo'::text, 'doing'::text, 'blocked'::text, 'review'::text, 'done'::text, 'cancelled'::text, 'ongoing'::text]))),
     CONSTRAINT task_title_check CHECK (((length(title) >= 1) AND (length(title) <= 300)))
 );
 

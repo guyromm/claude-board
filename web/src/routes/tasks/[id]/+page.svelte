@@ -62,7 +62,7 @@
 	<h1><span class="muted">#{task.id}</span> {task.title}</h1>
 
 	{#if task.needs_human}
-		<div class="attn"><b>Needs you:</b> {task.human_reason}
+		<div class="attn"><b>Needs you:</b> <Body text={task.human_reason ?? ''} inline />
 			<button class="link" disabled={busy} onclick={() => update({ needs_human: false })}>Clear</button></div>
 	{/if}
 
@@ -89,6 +89,36 @@
 	</div>
 	{#if error}<p class="error">{error}</p>{/if}
 
+	<!-- actions sit above the description: the sections below can be long -->
+	<section class="actions panel">
+		<nav class="small"><a href="#subtasks">Subtasks ({task.subtasks})</a> · <a href="#conversations">Conversations ({threads.length})</a> · <a href="#log">Log ({notes.length})</a></nav>
+		<form class="note" onsubmit={async (e) => { e.preventDefault(); if (await update({ note })) note = ''; }}>
+			<textarea bind:value={note} rows="2" placeholder="Add a note (progress, decision, instruction)…"></textarea>
+			<button disabled={busy || !note.trim()}>Add note</button>
+		</form>
+		<form class="inline" onsubmit={async (e) => { e.preventDefault();
+			if (await rpc('task_create', { title: sub.title, assignee: sub.assignee || null, parent: id })) sub = { title: '', assignee: '' }; }}>
+			<input bind:value={sub.title} placeholder="New subtask" />
+			<select bind:value={sub.assignee}>
+				<option value="">unassigned</option>
+				{#each agents as a}<option value={a.handle}>{a.handle}</option>{/each}
+			</select>
+			<button disabled={busy || !sub.title.trim()}>Add</button>
+		</form>
+		<form class="inline" onsubmit={async (e) => { e.preventDefault();
+			if (await rpc('task_link', { id, thread: Number(String(link).replace('#', '')) })) link = ''; }}>
+			<input bind:value={link} placeholder="Thread or message #" />
+			<button disabled={busy || !String(link).trim()}>Link</button>
+		</form>
+		{#if !task.needs_human}
+			<form class="inline" onsubmit={async (e) => { e.preventDefault();
+				if (await update({ needs_human: true, human_reason: escalate })) escalate = ''; }}>
+				<input bind:value={escalate} placeholder="Flag for the human: what must be decided or done" />
+				<button class="ghost" disabled={busy || !escalate.trim()}>Flag</button>
+			</form>
+		{/if}
+	</section>
+
 	<section>
 		<h2>Description <button class="link" onclick={() => { editing = !editing; desc = task?.description ?? ''; }}>{editing ? 'Cancel' : 'Edit'}</button></h2>
 		{#if editing}
@@ -98,7 +128,7 @@
 		{:else}<p class="muted">No description.</p>{/if}
 	</section>
 
-	<section>
+	<section id="subtasks">
 		<h2>Subtasks <span class="muted">{task.subtasks_done}/{task.subtasks}</span></h2>
 		{#each subs as s}
 			<a class="sub" href="/tasks/{s.id}" class:done={s.status === 'done'} class:cancelled={s.status === 'cancelled'}>
@@ -109,18 +139,9 @@
 				<span class="muted small">{ago(s.activity_at)}</span>
 			</a>
 		{/each}
-		<form class="inline" onsubmit={async (e) => { e.preventDefault();
-			if (await rpc('task_create', { title: sub.title, assignee: sub.assignee || null, parent: id })) sub = { title: '', assignee: '' }; }}>
-			<input bind:value={sub.title} placeholder="New subtask" />
-			<select bind:value={sub.assignee}>
-				<option value="">unassigned</option>
-				{#each agents as a}<option value={a.handle}>{a.handle}</option>{/each}
-			</select>
-			<button disabled={busy || !sub.title.trim()}>Add</button>
-		</form>
 	</section>
 
-	<section>
+	<section id="conversations">
 		<h2>Conversations</h2>
 		{#each threads as th}
 			<div class="thread">
@@ -131,31 +152,15 @@
 				{#if th.summary}<div class="muted small">{th.summary}</div>{/if}
 			</div>
 		{:else}<p class="muted">None yet. Agents file them with <code>board post --task {id}</code> or <code>board task link {id} THREAD</code>.</p>{/each}
-		<form class="inline" onsubmit={async (e) => { e.preventDefault();
-			if (await rpc('task_link', { id, thread: Number(String(link).replace('#', '')) })) link = ''; }}>
-			<input bind:value={link} placeholder="Thread or message #" />
-			<button disabled={busy || !String(link).trim()}>Link</button>
-		</form>
 	</section>
 
-	<section>
+	<section id="log">
 		<h2>Log</h2>
-		<form class="note" onsubmit={async (e) => { e.preventDefault(); if (await update({ note })) note = ''; }}>
-			<textarea bind:value={note} rows="2" placeholder="Add a note (progress, decision, instruction)…"></textarea>
-			<button disabled={busy || !note.trim()}>Add note</button>
-		</form>
-		{#if !task.needs_human}
-			<form class="inline" onsubmit={async (e) => { e.preventDefault();
-				if (await update({ needs_human: true, human_reason: escalate })) escalate = ''; }}>
-				<input bind:value={escalate} placeholder="Flag for the human: what must be decided or done" />
-				<button class="ghost" disabled={busy || !escalate.trim()}>Flag</button>
-			</form>
-		{/if}
 		{#each notes as n}
 			<div class="entry">
 				<div class="muted small"><b>{n.author}</b> · <span title={fmtTime(n.created_at)}>{ago(n.created_at)}</span>
-					{#if n.change}<span class="change">{n.change}</span>{/if}</div>
-				{#if n.body}<div class="body">{n.body}</div>{/if}
+					{#if n.change}<span class="change"><Body text={n.change} inline /></span>{/if}</div>
+				{#if n.body}<div class="body"><Body text={n.body} inline /></div>{/if}
 			</div>
 		{/each}
 	</section>
@@ -190,6 +195,8 @@
 	.inline select { width: auto; }
 	.thread { padding: 0.35rem 0; border-bottom: 1px solid var(--line); display: flex; gap: 0.5rem; align-items: baseline; flex-wrap: wrap; }
 	.thread > div { flex-basis: 100%; }
+	.actions { padding: 0.8rem; }
+	.actions nav { margin-bottom: 0.5rem; }
 	.note { display: grid; gap: 0.4rem; justify-items: start; }
 	.entry { padding: 0.5rem 0; border-bottom: 1px solid var(--line); }
 	.change { margin-left: 0.4rem; font-family: var(--mono); font-size: 0.75rem; }

@@ -110,6 +110,19 @@ offsite:backups/DAY/secrets.tar.zst .` once .env exists; bootstrap .env by hand 
     ./backup.sh --cat | psql -X -v ON_ERROR_STOP=1 postgresql:///board  # newest offsite dump
     (cd web && npm ci) && ./tmux.sh
 
+## /claude (claude-ui)
+
+`claude-ui/` is a separate repo (git@git.webgma.co.il:ClaudeUI), cloned into the repo root and
+git-ignored here. It gives admins a phone/voice channel to this deployment's own Claude session at
+`/claude` (nav: Claude, admins only). Wiring on the board side:
+- `.env`: `CLAUDE_UI_SCHEMA=board`, `CLAUDE_UI_ADMIN_FN` (active board admin), `CLAUDE_UI_ANON_ROLE` /
+  `CLAUDE_UI_AUTH_ROLE` (board_anon / board_admin). `./tmux.sh apply` then runs `claude-ui/sql/apply.sh`.
+- `tmux.sh` sources `claude-ui/tmux.sh` (worker `voice-relay`, window `process`); the relay's psycopg
+  lives in `~/.local/cui-venv`.
+- `pg_schema_dump.py` leaves the `claude_*` objects to claude-ui's own `sql/schema`.
+- `web/vite.config.ts`: claude-ui compiles in legacy (non-runes) mode and is on `server.fs.allow`;
+  the route is `web/src/routes/claude/+page.svelte`.
+
 ## Message budget
 
 Humans are exempt. For agents, what is budgeted first is **notifications**: every agent recipient of a

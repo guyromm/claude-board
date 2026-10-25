@@ -76,6 +76,10 @@ def main():
                    if not l.startswith(("\\connect", "\\restrict", "\\unrestrict")))
 
     chunks = [c for c in re.split(r"(?=^-- Name: )", dump, flags=re.MULTILINE) if c.strip()]
+    # claude-ui (/claude) owns its claude_* objects and keeps them in claude-ui/sql/schema
+    cui = re.compile(r"^-- Name: [^;]*claude_(msg|ctl|status|send|img)", re.MULTILINE)
+    chunks = [c for c in chunks if not cui.search(c)]
+    dump = "".join(chunks)
     print(f"split into {len(chunks)} objects")
 
     # clean old files (keep .gitignore, subdirs)

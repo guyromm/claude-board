@@ -49,6 +49,10 @@ WORKER_WINDOWS[db-backup]=ops
 WORKER_WINDOWS[push]=ops
 WORKER_WINDOWS[backup-monitor]=ops
 WORKER_WINDOWS[claude]=claude
+# claude-ui (/claude page): registers its voice-relay worker. Sourced BEFORE notify_claude below so
+# board's own notify_claude wins. The relay needs psycopg: a venv outside the repo (python3 -m venv
+# ~/.local/cui-venv && ~/.local/cui-venv/bin/pip install 'psycopg[binary]').
+[ -f "$DIR/claude-ui/tmux.sh" ] && PYBIN="$HOME/.local/cui-venv/bin/python" && source "$DIR/claude-ui/tmux.sh"
 
 # ---------- low-level tmux helpers ----------
 t()   { tmux "$@"; }
@@ -150,6 +154,7 @@ INSERT INTO board.secret (jwt_secret) VALUES (:'secret')
 ON CONFLICT (singleton) DO UPDATE SET jwt_secret = EXCLUDED.jwt_secret;
 SQL
     echo "schema applied, JWT secret synced"
+    [ -x "$DIR/claude-ui/sql/apply.sh" ] && (set -a; source "$DIR/.env"; set +a; "$DIR/claude-ui/sql/apply.sh")
 }
 
 # alert_once KEY MSG: notify once per failure EPISODE (an hourly retry against an

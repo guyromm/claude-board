@@ -3,6 +3,7 @@
 	import { goto } from '$app/navigation';
 	import { api, ago, TASK_STATUSES, TASK_LABEL, type Task, type TaskStatus, type Agent } from '#lib/api.svelte.ts';
 	import { every, REFRESH_MS } from '#lib/poll.ts';
+	import { groupTree } from '#lib/tasktree.ts';
 
 	// Kanban over board.task: one column per status. ?root=ID narrows to a task and everything under it,
 	// ?who=HANDLE to one assignee. Cards are dragged between columns (and reordered within one).
@@ -13,6 +14,7 @@
 
 	const root = $derived(Number(page.url.searchParams.get('root')) || null);
 	const who = $derived(page.url.searchParams.get('who') ?? '');
+	let projOpen = $state(false);
 
 	const load = () =>
 		api<Task[]>('/tasks?status=neq.cancelled&order=position,id')
@@ -93,13 +95,28 @@
 
 <div class="head">
 	<h1>Tasks {#if root && byId.get(root)}<span class="muted">› <a href="/tasks/{root}">#{root} {byId.get(root)?.title}</a></span>{/if}</h1>
-	<!-- each project's colour: a ■ in that colour (option colours render in Chrome/Firefox on Linux and
-	     Windows; macOS menus ignore them), and the closed select shows the chosen project's colour -->
-	<select class="proj" value={root ?? ''} onchange={(e) => setParam('root', e.currentTarget.value)}
-		style={root ? `border-left: 6px solid hsl(${hue(root)} 65% 50%)` : ''}>
-		<option value="">All projects</option>
-		{#each roots as r}<option value={r.id} style="color: hsl({hue(r.id)} 65% 42%)">■ #{r.id} {r.title}</option>{/each}
-	</select>
+	<!-- project picker: a small menu instead of a native <select>, whose menus ignore option colours
+	     on most platforms, so each project's colour square really shows -->
+	<div class="proj" onfocusout={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) projOpen = false; }}>
+		<button type="button" class="proj-btn" aria-haspopup="listbox" aria-expanded={projOpen}
+			onclick={() => (projOpen = !projOpen)} onkeydown={(e) => e.key === 'Escape' && (projOpen = false)}>
+			{#if root && byId.get(root)}<span class="sw" style="background: hsl({hue(root)} 65% 50%)"></span>#{root} {byId.get(root)?.title}
+			{:else}All projects{/if}
+			<span class="caret">▾</span>
+		</button>
+		{#if projOpen}
+			<div class="proj-menu panel" role="listbox" tabindex="-1" onkeydown={(e) => e.key === 'Escape' && (projOpen = false)}>
+				<button type="button" role="option" aria-selected={!root} class:on={!root}
+					onclick={() => { projOpen = false; setParam('root', ''); }}><span class="sw none"></span>All projects</button>
+				{#each roots as r}
+					<button type="button" role="option" aria-selected={root === r.id} class:on={root === r.id}
+						onclick={() => { projOpen = false; setParam('root', String(r.id)); }}>
+						<span class="sw" style="background: hsl({hue(r.id)} 65% 50%)"></span>#{r.id} {r.title}
+					</button>
+				{/each}
+			</div>
+		{/if}
+	</div>
 	<select value={who} onchange={(e) => setParam('who', e.currentTarget.value)}>
 		<option value="">Everyone</option>
 		{#each agents as a}<option value={a.handle}>{a.handle}</option>{/each}
@@ -140,13 +157,13 @@
 			ondragover={(e) => { e.preventDefault(); over = s; }}
 			ondragleave={() => (over = over === s ? null : over)}
 			ondrop={(e) => { e.preventDefault(); drop(s, null); }}>
-			<h2>{TASK_LABEL[s]} <span class="muted">{column(s).length}</span></h2>
-			{#each column(s) as t (t.id)}
-				<a class="card panel" href="/tasks/{t.id}" style="--proj: {projColor(t)}" title="project: #{rootOf(t).id} {rootOf(t).title}" draggable="true" class:human={t.needs_human} class:dim={dragging === t.id}
+			<h2><a href="/tasks/{s}{who ? `?who=${encodeURIComponent(who)}` : ''}" title="{TASK_LABEL[s]}, one column per project">{TASK_LABEL[s]}</a> <span class="muted">{column(s).length}</span></h2>
+			{#each groupTree(column(s), byId) as { t, depth } (t.id)}
+				<a class="card panel" class:sub={depth > 0} href="/tasks/{t.id}" style="--proj: {projColor(t)}; --depth: {depth}" title="project: #{rootOf(t).id} {rootOf(t).title}" draggable="true" class:human={t.needs_human} class:dim={dragging === t.id}
 					ondragstart={(e) => { dragging = t.id; e.dataTransfer?.setData('text/plain', String(t.id)); }}
 					ondragend={() => { dragging = null; over = null; }}
 					ondrop={(e) => { e.preventDefault(); e.stopPropagation(); drop(s, t); }}>
-					{#if path(t).length}<div class="path muted">{path(t).map((p) => p.title).join(' › ')}</div>{/if}
+					{#if path(t).length && !depth}<div class="path muted">{path(t).map((p) => p.title).join(' › ')}</div>{/if}
 					<div class="title"><span class="muted">#{t.id}</span> {t.title}</div>
 					{#if t.needs_human}<div class="reason">Needs you: {t.human_reason}</div>{/if}
 					<div class="meta">
@@ -167,16 +184,28 @@
 	.head { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; margin-bottom: 1rem; }
 	.head h1 { margin: 0; flex: 1; min-width: 12rem; }
 	.head select { width: auto; max-width: 16rem; }
+	.proj { position: relative; }
+	.proj-btn { display: flex; align-items: center; gap: 0.4rem; max-width: 18rem; white-space: nowrap; overflow: hidden;
+		text-overflow: ellipsis; }
+	.caret { margin-left: auto; padding-left: 0.3rem; color: var(--muted); }
+	.proj-menu { position: absolute; z-index: 20; top: calc(100% + 4px); left: 0; min-width: 16rem; max-width: min(26rem, 90vw);
+		max-height: 60vh; overflow-y: auto; display: grid; padding: 0.3rem; box-shadow: 0 6px 24px rgb(0 0 0 / 0.18); }
+	.proj-menu button { display: flex; align-items: center; gap: 0.5rem; text-align: left; background: transparent;
+		border: 0; color: var(--ink); padding: 0.35rem 0.5rem; border-radius: 4px; font: inherit; cursor: pointer; }
+	.proj-menu button:hover, .proj-menu button.on { background: color-mix(in srgb, var(--line) 45%, transparent); }
+	.sw { flex: none; width: 0.8rem; height: 0.8rem; border-radius: 2px; }
+	.sw.none { border: 1px dashed var(--line); }
 	.new { display: grid; gap: 0.5rem; padding: 0.8rem; margin-bottom: 1rem; }
 	.new .row { display: flex; gap: 0.5rem; flex-wrap: wrap; }
 	.new .row > * { flex: 1; min-width: 10rem; }
 	.attn { background: color-mix(in srgb, #d9480f 10%, var(--panel)); border-left: 4px solid #d9480f; padding: 0.5rem 0.75rem;
 		border-radius: 6px; margin-bottom: 1rem; font-size: 0.9rem; }
-	.board { display: grid; grid-template-columns: repeat(5, minmax(220px, 1fr)); gap: 0.75rem; overflow-x: auto; padding-bottom: 1rem; }
+	.board { display: grid; grid-template-columns: repeat(6, minmax(180px, 1fr)); gap: 0.75rem; overflow-x: auto; padding-bottom: 1rem; }
 	.col { background: color-mix(in srgb, var(--line) 35%, transparent); border-radius: 8px; padding: 0.5rem; min-height: 8rem;
 		display: flex; flex-direction: column; gap: 0.5rem; }
 	.col.over { outline: 2px dashed var(--accent); }
 	.col h2 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em; margin: 0.1rem 0.2rem; }
+	.col h2 a { color: inherit; }
 	.col.blocked h2 { color: #d9480f; }
 	.col.done h2 { color: #2e9d5b; }
 	.card { display: grid; gap: 0.3rem; padding: 0.55rem 0.65rem; color: var(--ink); cursor: grab; font-size: 0.88rem;
@@ -185,6 +214,8 @@
 	.card:hover { text-decoration: none; border-color: var(--accent); }
 	.card.human { border-color: #d9480f; box-shadow: 0 0 0 1px #d9480f; }
 	.card.dim { opacity: 0.4; }
+	/* a subtask under its ancestor in the same column: indented one step per level */
+	.card.sub { margin-left: calc(var(--depth) * 0.9rem); margin-top: -0.25rem; }
 	.path { font-size: 0.72rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 	.title { font-weight: 600; line-height: 1.3; }
 	.reason { color: #d9480f; font-size: 0.78rem; font-weight: 500; }

@@ -26,7 +26,8 @@ CREATE OR REPLACE VIEW api.agents AS
     session_detail,
     session_checked_at,
     session_changed_at,
-    watcher_version
+    watcher_version,
+    claude_ui_url
    FROM board.agent a;
 
 

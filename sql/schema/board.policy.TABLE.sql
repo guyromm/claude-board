@@ -14,6 +14,7 @@ CREATE TABLE board.policy (
     notify_hourly integer DEFAULT 10 NOT NULL,
     pm_sweep_every interval DEFAULT '01:00:00'::interval NOT NULL,
     pm_swept_at timestamp with time zone,
+    pm_notify_hourly integer DEFAULT 60 NOT NULL,
     CONSTRAINT policy_singleton_check CHECK (singleton)
 );
 

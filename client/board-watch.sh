@@ -15,7 +15,7 @@
 # and, when the board has a newer one, installs the new board + board-watch.sh and exits, so its restart
 # loop (board watch-start, or the project's tmux.sh worker) starts the new version. Bump WATCH_VERSION
 # here to push a change to every agent.
-WATCH_VERSION=9
+WATCH_VERSION=12
 BOARD_HOME="${BOARD_HOME:-$HOME/.board}"
 source "$BOARD_HOME/config" || { echo "no $BOARD_HOME/config"; exit 1; }
 BOARD_API="${BOARD_API:-@BOARD_API@}"
@@ -48,6 +48,8 @@ screen() { tmux capture-pane -p -J -t "$T" 2>/dev/null | sed 's/[[:space:]]*$//'
 # The error line is short and shaped "<problem> · <remedy>"; anchoring on that keeps an assistant reply that merely
 # quotes "Please run /login" from counting.
 LOGOUT_RE='^[[:space:]]*(●|⏺)[[:space:]]+[^·]{1,80}[[:space:]]·[[:space:]](Please run /login|Run /login|Sign in again)'
+# first-run onboarding: the theme picker, then the login method picker (no /login needed, nor possible)
+FIRSTRUN_RE='^[[:space:]]*(Choose the text style that looks best with your terminal|Select login method:)'
 # Blocked = the session can't take input (and so can't get notifications) for BLOCKED_AFTER seconds:
 #   needs_input  no input line: a question (AskUserQuestion), permission or other dialog waits for a human
 #   no_claude    no Claude process under the pane (Claude exited; the pane's shell is all that is left).
@@ -76,6 +78,11 @@ check_session() {
         elif [[ "$line" == *"Login successful"* ]]; then state=ok; detail=
         fi
     done < <(screen)
+    # a never-logged-in Claude (fresh install) opens on its first-run screens, not on a "Please run /login" line.
+    # Only with no input line: a session merely SHOWING that text (in a tool result) still has one.
+    if [ "$state" = ok ] && screen | grep -q -E "$FIRSTRUN_RE" && input_busy && [[ "$INPUT_WHY" == "no Claude input line"* ]]; then
+        state=logged_out; detail="not logged in yet (Claude's first-run login screen)"
+    fi
     if [ "$state" = ok ]; then
         if ! claude_under "$(tmux display-message -p -t "$T" '#{pane_pid}' 2>/dev/null)"; then
             cmd=$(tmux display-message -p -t "$T" '#{pane_current_command}' 2>/dev/null)
@@ -108,18 +115,28 @@ check_session() {
 # it and submit it, so delivery waits. No input line at all (a permission or other dialog is up) also
 # waits: keystrokes would answer the dialog.
 INPUT_WHY=
+# A selection dialog (AskUserQuestion, permission prompt) marks its current option with the same "❯"+NBSP
+# as the input line ("❯ 1. Posts only"), so the line alone can't tell them apart: a numbered option behind
+# the marker, or the dialog's footer near the bottom, means a dialog is up and there is no input line.
+dialog_open() {
+    screen | awk '{ l[NR] = $0 } /[^[:space:]]/ { n = NR } END { for (i = (n > 25 ? n - 24 : 1); i <= n; i++) print l[i] }' \
+        | grep -a -q -E $'^[[:space:]]*❯(\xc2\xa0|[[:space:]])+[0-9]+\\.[[:space:]]|^[[:space:]]*Enter to select ·'
+}
 input_busy() {
     local line pre rest codes text
+    if dialog_open; then INPUT_WHY="no Claude input line visible (dialog open)"; return 0; fi
     line=$(tmux capture-pane -p -e -t "$T" 2>/dev/null | grep -a -E $'^(\e\\[[0-9;]*m)*[[:space:]]*(❯|!)\xc2\xa0' | tail -n 1)
     if [ -z "$line" ]; then INPUT_WHY="no Claude input line visible (dialog open?)"; return 0; fi
     pre="${line%%$'\xc2\xa0'*}"; rest="${line#*$'\xc2\xa0'}"
     if [[ "$pre" == *'!' ]]; then INPUT_WHY="input line is in shell (!) mode"; return 0; fi
     local sgr=$'\e''\[[0-9;]*m'
-    [[ "$rest" =~ ^(($sgr)*)(.*)$ ]]
-    codes="${BASH_REMATCH[1]}"; text=$(sed -E $'s/\e\\[[0-9;]*m//g; s/[[:space:]]+$//' <<<"${BASH_REMATCH[3]}")
+    # the styles around the first character: the cursor can sit on it in inverse video ("\e[7ma\e[27m\e[2msk..."),
+    # so a dim placeholder or prompt suggestion may only turn dim after it
+    [[ "$rest" =~ ^(($sgr)*)(.)?(($sgr)*) ]]
+    codes="${BASH_REMATCH[1]}${BASH_REMATCH[4]}"; text=$(sed -E $'s/\e\\[[0-9;]*m//g; s/[[:space:]]+$//' <<<"$rest")
     [ -z "$text" ] && return 1
-    [[ "$codes" =~ \[(2|[0-9\;]*\;2)[\;m] ]] && return 1        # SGR 2 (dim) before the text = the placeholder
-    INPUT_WHY="someone is typing in the input line"; return 0
+    [[ "$codes" =~ \[(2|[0-9\;]*\;2)[\;m] ]] && return 1        # SGR 2 (dim) = the placeholder or a suggestion
+    INPUT_WHY="someone is typing in the input line (styles: $(sed -E $'s/\e\\[([0-9;]*)m/<\\1>/g' <<<"$codes"))"; return 0
 }
 
 HELD_SINCE=0
@@ -190,9 +207,14 @@ login_step() {
 
     case "$state" in
     requested)
-        tmux send-keys -t "$T" -l -- "/login" && sleep 0.4 && tmux send-keys -t "$T" Enter
         L_T0=$t
-        progress started "typed /login into $T; waiting for the sign-in URL"
+        if screen | grep -q -E "$FIRSTRUN_RE"; then
+            # first run: the login picker is (about to be) on screen already; the started step answers it
+            progress started "first-run login screen in $T; waiting for the sign-in URL"
+        else
+            tmux send-keys -t "$T" -l -- "/login" && sleep 0.4 && tmux send-keys -t "$T" Enter
+            progress started "typed /login into $T; waiting for the sign-in URL"
+        fi
         ;;
     started|url_ready|code_rejected)
         scr=$(login_screen)
@@ -212,7 +234,8 @@ login_step() {
                 fi
             fi
             L_CAND=$url
-        elif [[ "$scr" == *"Select login method"* ]]; then
+        elif [[ "$scr" == *"Select login method"* || "$scr" == *"Choose the text style"* ]]; then
+            # (the theme picker comes first on a fresh install: Enter keeps its default too)
             # first option = "Claude account with subscription" (the default)
             if [ $((t - L_PICK)) -ge 3 ]; then tmux send-keys -t "$T" Enter; L_PICK=$t; log "login #$id: picked the default login method"; fi
         elif [[ "$scr" == *"Press Enter to retry"* || "$scr" == *"to retry."* ]]; then
