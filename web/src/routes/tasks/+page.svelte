@@ -4,6 +4,7 @@
 	import { api, ago, TASK_STATUSES, TASK_LABEL, type Task, type TaskStatus, type Agent } from '#lib/api.svelte.ts';
 	import { every, REFRESH_MS } from '#lib/poll.ts';
 	import { groupTree } from '#lib/tasktree.ts';
+	import Body from '#lib/Body.svelte';
 
 	// Kanban over board.task: one column per status. ?root=ID narrows to a task and everything under it,
 	// ?who=HANDLE to one assignee. Cards are dragged between columns (and reordered within one).
@@ -42,15 +43,33 @@
 	};
 	const hue = (id: number) => Math.round((id * 137.508) % 360);
 	const projColor = (t: Task) => `hsl(${hue(rootOf(t).id)} 65% 50%)`;
+	// a short project name for a task: its top-level task's title up to " (" or ":" ("pethelp", "flights");
+	// a top-level task is its own project, so it's named after its owner instead
+	const projName = (t: Task) => {
+		const r = rootOf(t);
+		return r.id !== t.id ? r.title.split(/ \(|:/)[0].trim() : (t.assignee ?? 'unassigned');
+	};
 	const shown = $derived(tasks.filter((t) => (!root || under(t, root)) && (!who || t.assignee === who)));
 	const column = (s: TaskStatus) => shown.filter((t) => t.status === s);
 	const attention = $derived(shown.filter((t) => t.needs_human));
+	// folded "Needs you": the task numbers grouped by project, in first-seen order
+	const attnByProj = $derived.by(() => {
+		const m = new Map<string, Task[]>();
+		for (const t of attention) m.set(projName(t), [...(m.get(projName(t)) ?? []), t]);
+		return [...m];
+	});
 
-	function setParam(k: string, v: string) {
+	function setParam(k: string, v: string, opts: { replace?: boolean; reset?: boolean } = {}) {
 		const q = new URLSearchParams(page.url.search);
 		if (v) q.set(k, v); else q.delete(k);
-		goto(`/tasks${q.size ? `?${q}` : ''}`);
+		goto(`/tasks${q.size ? `?${q}` : ''}`, opts);
 	}
+	// "Needs you" is folded by default; ?needs=1 keeps it open (shareable, survives reload)
+	const needsOpen = $derived(page.url.searchParams.get('needs') === '1');
+	// escalations list options inline ("... (A) do x; (B) do y. Recommended: A"): one line per option + the recommendation
+	const optionLines = (s: string) =>
+		s.replace(/\s+(\((?:[A-Za-z]|\d{1,2})\)\s)/g, '\n$1').replace(/\s+(Recommended\b)/g, '\n$1');
+	const toggleNeeds = () => setParam('needs', needsOpen ? '' : '1', { replace: true, reset: false });
 
 	// drag & drop: drop on a card = place before it, drop on the column = append
 	let dragging = $state<number | null>(null);
@@ -146,8 +165,21 @@
 
 {#if attention.length}
 	<div class="attn">
-		<b>Needs you:</b>
-		{#each attention as t}<a href="/tasks/{t.id}">#{t.id} {t.title}</a> — {t.human_reason}{' '}{/each}
+		<button class="attn-head" onclick={toggleNeeds} aria-expanded={needsOpen}>
+			<span class="caret">{needsOpen ? '▾' : '▸'}</span> <b>Needs you</b> <span class="muted">{attention.length}</span>
+		</button>
+		{#if needsOpen}
+			<ol>
+				{#each attention as t (t.id)}
+					<li><span class="pname" style="--proj: {projColor(t)}">{projName(t)}</span>
+						<a href="/tasks/{t.id}"><b>#{t.id}</b> {t.title}</a>
+						<div class="why"><Body text={optionLines(t.human_reason ?? '')} inline /></div></li>
+				{/each}
+			</ol>
+		{:else}
+			<span class="ids">{#each attnByProj as [name, ts], g (name)}{g ? ', ' : ''}<span class="pname" style="--proj: {projColor(ts[0])}">{name}</span>
+				({#each ts as t, i (t.id)}{i ? ', ' : ''}<a href="/tasks/{t.id}" title={t.title}>#{t.id}</a>{/each}){/each}</span>
+		{/if}
 	</div>
 {/if}
 
@@ -200,6 +232,13 @@
 	.new .row > * { flex: 1; min-width: 10rem; }
 	.attn { background: color-mix(in srgb, #d9480f 10%, var(--panel)); border-left: 4px solid #d9480f; padding: 0.5rem 0.75rem;
 		border-radius: 6px; margin-bottom: 1rem; font-size: 0.9rem; }
+	.attn-head { background: none; border: 0; padding: 0; font: inherit; color: inherit; cursor: pointer; }
+	.attn .caret { display: inline-block; width: 1em; }
+	.attn .ids { margin-left: 0.5rem; }
+	.attn ol { margin: 0.5rem 0 0; padding-left: 1.5rem; display: grid; gap: 0.6rem; }
+	.attn .pname { display: inline-block; font-size: 0.78rem; font-weight: 600; padding: 0 0.4rem; margin-right: 0.3rem; border-radius: 4px;
+		color: var(--proj); background: color-mix(in srgb, var(--proj) 14%, transparent); border: 1px solid color-mix(in srgb, var(--proj) 45%, transparent); }
+	.attn .why { margin-top: 0.15rem; line-height: 1.4; white-space: pre-wrap; }
 	.board { display: grid; grid-template-columns: repeat(6, minmax(180px, 1fr)); gap: 0.75rem; overflow-x: auto; padding-bottom: 1rem; }
 	.col { background: color-mix(in srgb, var(--line) 35%, transparent); border-radius: 8px; padding: 0.5rem; min-height: 8rem;
 		display: flex; flex-direction: column; gap: 0.5rem; }
