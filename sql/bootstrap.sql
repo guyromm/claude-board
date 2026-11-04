@@ -179,6 +179,10 @@ ALTER TABLE board.agent ADD COLUMN IF NOT EXISTS session_detail text;         --
 ALTER TABLE board.agent ADD COLUMN IF NOT EXISTS session_checked_at timestamptz;
 ALTER TABLE board.agent ADD COLUMN IF NOT EXISTS session_changed_at timestamptz;
 ALTER TABLE board.agent ADD COLUMN IF NOT EXISTS watcher_version integer;     -- NULL: watcher predates health checks
+-- the Claude session's model and Claude Code version, read by the watcher (v13+) from the session's transcript
+ALTER TABLE board.agent ADD COLUMN IF NOT EXISTS claude_model text;           -- e.g. claude-opus-5-5
+ALTER TABLE board.agent ADD COLUMN IF NOT EXISTS claude_version text;         -- e.g. 2.1.312
+ALTER TABLE board.agent ADD COLUMN IF NOT EXISTS claude_info_at timestamptz;  -- when the watcher last read them
 -- the agent's claude-ui (the web/phone UI onto its Claude session), shown as a link on the Agents page
 ALTER TABLE board.agent ADD COLUMN IF NOT EXISTS claude_ui_url text;
 ALTER TABLE board.agent DROP CONSTRAINT IF EXISTS agent_claude_ui_url_check;
@@ -258,6 +262,88 @@ ALTER TABLE board.task DROP CONSTRAINT IF EXISTS task_ongoing_daily;
 ALTER TABLE board.task ADD CONSTRAINT task_ongoing_daily CHECK (status <> 'ongoing' OR check_every <= interval '1 day');
 CREATE INDEX IF NOT EXISTS task_assignee_idx ON board.task (assignee);
 
+-- SEMANTIC TASK IDS (guy, 2026-11-04): a subtask's path is its parent's path + "/" + its number under that
+-- parent (1, 2, ... in creation order, never reused: the parent's child_seq counts them), so task 119's
+-- subtasks are 119/1, 119/2 and theirs 119/1/1 ... A top-level task's path is its id. Written "#119/3" (a
+-- subtask) or "#119/" (a top-level task; bare "#119" is a message). The sequential ids stay valid. A task
+-- that moves gets a new path; its old paths (and its subtree's) stay in board.task_alias and still resolve.
+ALTER TABLE board.task ADD COLUMN IF NOT EXISTS path text;
+ALTER TABLE board.task ADD COLUMN IF NOT EXISTS seq integer;          -- its number under its parent
+ALTER TABLE board.task ADD COLUMN IF NOT EXISTS child_seq integer NOT NULL DEFAULT 0;  -- last number given to a child
+CREATE TABLE IF NOT EXISTS board.task_alias (
+    path    text PRIMARY KEY,
+    task_id bigint NOT NULL REFERENCES board.task ON DELETE CASCADE
+);
+
+CREATE OR REPLACE FUNCTION board.task_path_ins() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE pp text;
+BEGIN
+    IF NEW.parent_id IS NULL THEN
+        NEW.seq := NULL; NEW.path := NEW.id::text;
+    ELSE
+        UPDATE board.task SET child_seq = child_seq + 1 WHERE id = NEW.parent_id RETURNING child_seq, path INTO NEW.seq, pp;
+        NEW.path := pp || '/' || NEW.seq;
+    END IF;
+    RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS task_path_ins ON board.task;
+CREATE TRIGGER task_path_ins BEFORE INSERT ON board.task FOR EACH ROW EXECUTE FUNCTION board.task_path_ins();
+
+-- moved under another parent: keep the old paths of it and its subtree as aliases, give it a new number
+-- under the new parent, and re-prefix its subtree
+CREATE OR REPLACE FUNCTION board.task_path_move() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE pp text;
+BEGIN
+    IF NEW.parent_id IS NOT DISTINCT FROM OLD.parent_id THEN RETURN NEW; END IF;
+    INSERT INTO board.task_alias (path, task_id)
+        SELECT x.path, x.id FROM board.task x WHERE x.id = OLD.id OR x.path LIKE OLD.path || '/%'
+        ON CONFLICT (path) DO UPDATE SET task_id = EXCLUDED.task_id;
+    IF NEW.parent_id IS NULL THEN
+        NEW.seq := NULL; NEW.path := NEW.id::text;
+    ELSE
+        UPDATE board.task SET child_seq = child_seq + 1 WHERE id = NEW.parent_id RETURNING child_seq, path INTO NEW.seq, pp;
+        NEW.path := pp || '/' || NEW.seq;
+    END IF;
+    UPDATE board.task x SET path = NEW.path || substr(x.path, length(OLD.path) + 1) WHERE x.path LIKE OLD.path || '/%';
+    RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS task_path_move ON board.task;
+CREATE TRIGGER task_path_move BEFORE UPDATE OF parent_id ON board.task FOR EACH ROW EXECUTE FUNCTION board.task_path_move();
+
+-- backfill: existing tasks numbered under their parents in id order, top-down
+DO $$
+DECLARE n integer;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM board.task WHERE path IS NULL) THEN RETURN; END IF;
+    UPDATE board.task t SET seq = x.rn
+      FROM (SELECT id, row_number() OVER (PARTITION BY parent_id ORDER BY id) AS rn FROM board.task WHERE parent_id IS NOT NULL) x
+     WHERE x.id = t.id AND t.seq IS NULL;
+    UPDATE board.task p SET child_seq = greatest(p.child_seq, x.m)
+      FROM (SELECT parent_id, max(seq) AS m FROM board.task WHERE parent_id IS NOT NULL GROUP BY parent_id) x WHERE x.parent_id = p.id;
+    UPDATE board.task SET path = id::text WHERE parent_id IS NULL AND path IS NULL;
+    LOOP
+        UPDATE board.task c SET path = p.path || '/' || c.seq FROM board.task p
+         WHERE c.parent_id = p.id AND c.path IS NULL AND p.path IS NOT NULL;
+        GET DIAGNOSTICS n = ROW_COUNT;
+        EXIT WHEN n = 0;
+    END LOOP;
+END $$;
+ALTER TABLE board.task ALTER COLUMN path SET NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS task_path_idx ON board.task (path);
+
+-- "#119/3", "119/3/", "#119/", "119", "T119/3" -> the task id (NULL: no such task). No slash = the id itself.
+CREATE OR REPLACE FUNCTION board.task_resolve(ref text) RETURNS bigint LANGUAGE sql STABLE AS $$
+    WITH r AS (SELECT regexp_replace(btrim(ref), '^(#|[Tt])?(.*?)/?$', '\2') AS p)
+    SELECT CASE WHEN r.p ~ '^\d+$' THEN (SELECT t.id FROM board.task t WHERE t.id = r.p::bigint)
+                WHEN r.p ~ '^\d+(/\d+)+$' THEN coalesce((SELECT t.id FROM board.task t WHERE t.path = r.p),
+                                                         (SELECT a.task_id FROM board.task_alias a WHERE a.path = r.p)) END
+    FROM r
+$$;
+-- how a task is written: "#119/" (top level) or "#119/3"
+CREATE OR REPLACE FUNCTION board.task_ref(id bigint) RETURNS text LANGUAGE sql STABLE AS $$
+    SELECT '#' || t.path || CASE WHEN t.parent_id IS NULL THEN '/' ELSE '' END FROM board.task t WHERE t.id = task_ref.id
+$$;
+
 CREATE TABLE IF NOT EXISTS board.task_note (
     id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     task_id     bigint NOT NULL REFERENCES board.task ON DELETE CASCADE,
@@ -329,6 +415,19 @@ BEGIN
 END $$;
 CREATE OR REPLACE TRIGGER message_thread BEFORE INSERT ON board.message
     FOR EACH ROW EXECUTE FUNCTION board.message_thread();
+
+-- a human's post in a thread that needs them answers it: it leaves "Needs you" at once; the summarizer,
+-- prompted by that post, flags it again if the human is still needed
+CREATE OR REPLACE FUNCTION board.message_human_answered() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF (SELECT kind FROM board.agent WHERE handle = NEW.sender) = 'human' THEN
+        UPDATE board.thread_summary SET needs_human = false, human_reason = NULL
+        WHERE thread_id = NEW.thread_id AND needs_human;
+    END IF;
+    RETURN NULL;
+END $$;
+CREATE OR REPLACE TRIGGER message_human_answered AFTER INSERT ON board.message
+    FOR EACH ROW EXECUTE FUNCTION board.message_human_answered();
 
 -- handle of the caller, from the verified JWT (NULL for anonymous)
 CREATE OR REPLACE FUNCTION board.me() RETURNS text LANGUAGE sql STABLE AS $$
@@ -454,7 +553,7 @@ SELECT a.handle, a.kind, a.display_name, a.host, a.tmux_target, a.system, a.desc
        (SELECT count(*) FROM board.message m WHERE m.sender = a.handle) AS sent_count,
        (SELECT count(*) FROM board.recipient r WHERE r.handle = a.handle) AS received_count,
        a.session_state, a.session_detail, a.session_checked_at, a.session_changed_at, a.watcher_version,
-       a.claude_ui_url
+       a.claude_ui_url, a.claude_model, a.claude_version, a.claude_info_at
 FROM board.agent a;
 
 CREATE OR REPLACE VIEW api.messages AS
@@ -840,8 +939,8 @@ BEGIN
         WHERE t.assignee = me AND t.assignee_notified_at IS NULL AND t.status NOT IN ('done', 'cancelled')
         RETURNING t.*
     )
-    SELECT count(*), string_agg(format('[board] task #%s "%s" was assigned to you by %s -- see it with: board task %s',
-                                       t.id, t.title, coalesce(w.author, t.created_by), t.id), E'\n' ORDER BY t.id)
+    SELECT count(*), string_agg(format('[board] task %s "%s" was assigned to you by %s -- see it with: board task %s',
+                                       board.task_ref(t.id), t.title, coalesce(w.author, t.created_by), t.id), E'\n' ORDER BY t.id)
     INTO tn, tlines
     FROM taken t
     LEFT JOIN LATERAL (SELECT n.author FROM board.task_note n WHERE n.task_id = t.id AND n.change ~ 'assign' ORDER BY n.id DESC LIMIT 1) w ON true
@@ -873,8 +972,8 @@ BEGIN
             UPDATE board.task t SET pm_prompted_at = now() FROM due WHERE t.id = due.id RETURNING t.*
         )
         SELECT count(*), string_agg(format(
-                   '[board] task #%s "%s" [%s, @%s]: %s -- check in: board task %s, then nudge the assignee, re-assign/split it, or escalate (board task update %s --human "WHY")',
-                   t.id, t.title, t.status, coalesce(t.assignee, 'unassigned'),
+                   '[board] task %s "%s" [%s, @%s]: %s -- check in: board task %s, then nudge the assignee, re-assign/split it, or escalate (board task update %s --human "WHY")',
+                   board.task_ref(t.id), t.title, t.status, coalesce(t.assignee, 'unassigned'),
                    CASE WHEN t.status IN ('blocked', 'review') AND t.activity_at >= now() - t.check_every
                         THEN 'moved to ' || t.status
                         WHEN t.status = 'ongoing'
@@ -895,7 +994,7 @@ BEGIN
                       AND (NOT t.needs_human OR board.task_human_answered(t.id)));
         IF FOUND THEN
             SELECT format('[board] hourly task sweep, %s open: %s -- for each: board task N (and its threads), judge whether it is moving toward done; if not, nudge whoever can advance it (assignee, or the agent it waits on) with ONE direct message filed under the task, re-assign/split, or escalate (--human). Skip tasks that are moving; note what you checked.',
-                          count(*), string_agg(format('#%s %s @%s %s%s', t.id, t.status, coalesce(t.assignee, '-'),
+                          count(*), string_agg(format('%s %s @%s %s%s', board.task_ref(t.id), t.status, coalesce(t.assignee, '-'),
                                                       board.fmt_age(now() - t.activity_at),
                                                       CASE WHEN t.needs_human THEN ' (HUMAN ANSWERED: act on it, then clear --no-human)' ELSE '' END),
                                                ', ' ORDER BY t.needs_human DESC, t.activity_at))
@@ -1029,6 +1128,9 @@ BEGIN
     IF nullif(trim(summarize.summary), '') IS NULL THEN RAISE EXCEPTION 'empty summary'; END IF;
     IF needs_human AND nullif(trim(human_reason), '') IS NULL THEN
         RAISE EXCEPTION 'needs_human requires human_reason' USING HINT = 'say what the human has to decide or do';
+    END IF;
+    IF needs_human AND length(trim(human_reason)) > 1500 THEN
+        RAISE EXCEPTION 'human_reason too long (% chars, max 1500)', length(trim(human_reason)) USING HINT = 'Markdown, short: goal line, options as a list, **Recommendation**, deadline, where the human acts; background goes in a note or doc:SLUG';
     END IF;
     SELECT max(x.id) INTO last_id FROM board.message x WHERE x.thread_id = t;
     INSERT INTO board.thread_summary AS s (thread_id, status, needs_human, human_reason, summary,
@@ -1168,21 +1270,53 @@ SELECT t.id, t.parent_id, t.title, t.description, t.status, t.assignee, t.create
        (SELECT count(*) FROM board.task c WHERE c.parent_id = t.id AND c.status = 'done') AS subtasks_done,
        coalesce((SELECT array_agg(x.thread_id ORDER BY x.thread_id) FROM board.task_thread x WHERE x.task_id = t.id), '{}') AS threads,
        (SELECT count(*) FROM board.task_note n WHERE n.task_id = t.id) AS notes,
-       (SELECT n.body FROM board.task_note n WHERE n.task_id = t.id AND n.body <> '' ORDER BY n.id DESC LIMIT 1) AS last_note
+       (SELECT n.body FROM board.task_note n WHERE n.task_id = t.id AND n.body <> '' ORDER BY n.id DESC LIMIT 1) AS last_note,
+       t.path
 FROM board.task t;
 
 CREATE OR REPLACE VIEW api.task_notes AS
 SELECT n.id, n.task_id, n.author, n.body, n.change, n.created_at FROM board.task_note n;
+
+-- one row per escalation ("needs you"), read back from the task log: raised (or re-worded) by a
+-- task_update with needs_human, ended by the next escalation event on that task. outcome: open (still
+-- needs the human), answered (a human's note/edit cleared it; answer = that note), cleared (cleared by
+-- hand, or the task closed), reworded (replaced by a new escalation text)
+CREATE OR REPLACE VIEW api.task_escalations AS
+WITH ev AS (
+    SELECT n.id, n.task_id, n.author, n.body, n.created_at,
+           CASE WHEN n.change ~ 'escalated to the human: ' THEN 'raised'
+                WHEN n.change ~ 'escalation answered by ' THEN 'answered' ELSE 'cleared' END AS kind,
+           substring(n.change FROM 'escalated to the human: (.*)$') AS reason
+    FROM board.task_note n
+    WHERE n.change ~ '(escalated to the human: |escalation answered by |escalation cleared)'
+)
+SELECT r.id, r.task_id, t.title AS task_title, t.status AS task_status, r.author AS raised_by, r.created_at AS raised_at,
+       r.reason, e.created_at AS ended_at, e.author AS ended_by,
+       CASE WHEN e.id IS NULL THEN 'open' WHEN e.kind = 'raised' THEN 'reworded' ELSE e.kind END AS outcome,
+       CASE WHEN e.kind = 'answered' THEN nullif(e.body, '') END AS answer
+FROM ev r
+JOIN board.task t ON t.id = r.task_id
+LEFT JOIN LATERAL (SELECT x.* FROM ev x WHERE x.task_id = r.task_id AND x.id > r.id ORDER BY x.id LIMIT 1) e ON true
+WHERE r.kind = 'raised';
 
 CREATE OR REPLACE VIEW api.task_threads AS
 SELECT x.task_id, x.thread_id, x.linked_by, x.linked_at, r.subject, t.last_at, t.size, t.status, t.needs_human, t.summary
 FROM board.task_thread x JOIN board.message r ON r.id = x.thread_id
 JOIN api.threads t ON t.thread_id = x.thread_id;
 
+-- one row per message, light (no body): the /banter chart aggregates these per day and agent;
+-- bytes = subject + body as stored, task_ids = tasks its thread is filed under
+CREATE OR REPLACE VIEW api.message_stats AS
+SELECT m.id, m.sender, m.thread_id, m.created_at, m.subject,
+       octet_length(coalesce(m.subject, '')) + octet_length(m.body) AS bytes,
+       COALESCE((SELECT array_agg(r.handle ORDER BY r.handle) FROM board.recipient r WHERE r.message_id = m.id), '{}'::text[]) AS recipients,
+       COALESCE((SELECT array_agg(x.task_id ORDER BY x.task_id) FROM board.task_thread x WHERE x.thread_id = m.thread_id), '{}'::bigint[]) AS task_ids
+FROM board.message m;
+
 -- one line per task: #12 [doing] title  @pethelp  2/5 subtasks  last activity 3h  !needs human
 CREATE OR REPLACE FUNCTION board.fmt_task(t board.task, indent integer DEFAULT 0) RETURNS text LANGUAGE sql STABLE AS $$
-    SELECT format('%s#%s [%s] %s  @%s%s  activity %s ago%s%s',
-        repeat('  ', indent), t.id, t.status, t.title, coalesce(t.assignee, 'unassigned'),
+    SELECT format('%s#%s%s [%s] %s  @%s%s  activity %s ago%s%s',
+        repeat('  ', indent), t.path, CASE WHEN t.parent_id IS NULL THEN '/' ELSE format(' (id %s)', t.id) END, t.status, t.title, coalesce(t.assignee, 'unassigned'),
         (SELECT CASE WHEN count(*) > 0 THEN format('  %s/%s subtasks done', count(*) FILTER (WHERE c.status = 'done'), count(*)) ELSE '' END
          FROM board.task c WHERE c.parent_id = t.id AND c.status <> 'cancelled'),
         board.fmt_age(now() - t.activity_at),
@@ -1209,7 +1343,7 @@ BEGIN
     RETURNING * INTO t;
     INSERT INTO board.task_note (task_id, author, body, change)
     VALUES (t.id, me, '', format('created%s', coalesce(', assigned to ' || who, '')));
-    RETURN format('task #%s created: %s', t.id, board.fmt_task(t));
+    RETURN format('task %s created: %s', board.task_ref(t.id), board.fmt_task(t));
 END $$;
 
 -- NULL = unchanged. assignee '-' unassigns, parent 0 makes it a top-level task, due '-' clears the due date,
@@ -1226,6 +1360,7 @@ DECLARE
     who text := nullif(lower(btrim(task_update.assignee, ' @')), '');
     changes text[] := '{}';
     edits boolean;
+    answered boolean := false;
 BEGIN
     SELECT * INTO o FROM board.task x WHERE x.id = task_update.id FOR UPDATE;
     IF NOT FOUND THEN RAISE EXCEPTION 'task #% not found', task_update.id; END IF;
@@ -1268,6 +1403,9 @@ BEGIN
         IF task_update.needs_human AND nullif(btrim(task_update.human_reason), '') IS NULL THEN
             RAISE EXCEPTION 'needs_human requires human_reason' USING HINT = 'say what the human has to decide or do';
         END IF;
+        IF task_update.needs_human AND length(btrim(task_update.human_reason)) > 1500 THEN
+            RAISE EXCEPTION 'human_reason too long (% chars, max 1500)', length(btrim(task_update.human_reason)) USING HINT = 'Markdown, short: goal line, options as a list, **Recommendation**, deadline, where the human acts; background goes in a note or doc:SLUG';
+        END IF;
         n.needs_human := task_update.needs_human;
         n.human_reason := CASE WHEN task_update.needs_human THEN btrim(task_update.human_reason) END;
     END IF;
@@ -1276,6 +1414,14 @@ BEGIN
     IF n.status IN ('done', 'cancelled') AND n.status IS DISTINCT FROM o.status AND n.needs_human
        AND task_update.needs_human IS NULL THEN
         n.needs_human := false; n.human_reason := NULL;
+    END IF;
+    -- a human's note or edit answers the escalation: the task leaves "Needs you" at once; the PM (told
+    -- below) or the assignee escalates again if the human is still needed
+    IF n.needs_human AND task_update.needs_human IS NULL AND (SELECT kind FROM board.agent WHERE handle = me) = 'human'
+       AND (nullif(btrim(task_update.note), '') IS NOT NULL
+            OR coalesce(task_update.status, who, task_update.title, task_update.description, task_update.parent::text,
+                        task_update.check_every, task_update.due) IS NOT NULL) THEN
+        n.needs_human := false; n.human_reason := NULL; answered := true;
     END IF;
 
     IF n.status IS DISTINCT FROM o.status THEN changes := changes || format('status: %s -> %s', o.status, n.status); END IF;
@@ -1288,14 +1434,15 @@ BEGIN
     IF n.check_every IS DISTINCT FROM o.check_every THEN changes := changes || format('check-in every %s', n.check_every); END IF;
     IF n.due_at IS DISTINCT FROM o.due_at THEN changes := changes || format('due: %s', coalesce(board.fmt_ts(n.due_at), '-')); END IF;
     IF n.needs_human IS DISTINCT FROM o.needs_human OR n.human_reason IS DISTINCT FROM o.human_reason THEN
-        changes := changes || CASE WHEN n.needs_human THEN 'escalated to the human: ' || n.human_reason ELSE 'escalation cleared' END;
+        changes := changes || CASE WHEN n.needs_human THEN 'escalated to the human: ' || n.human_reason
+                                   WHEN answered THEN format('escalation answered by %s, cleared', me) ELSE 'escalation cleared' END;
     END IF;
     IF cardinality(changes) = 0 AND nullif(btrim(task_update.note), '') IS NULL THEN
         IF n.position IS DISTINCT FROM o.position THEN
             UPDATE board.task x SET position = n.position WHERE x.id = o.id;
-            RETURN format('task #%s moved', o.id);
+            RETURN format('task %s moved', board.task_ref(o.id));
         END IF;
-        RETURN format('task #%s: nothing changed', o.id);
+        RETURN format('task %s: nothing changed', board.task_ref(o.id));
     END IF;
 
     UPDATE board.task x SET status = n.status, assignee = n.assignee, title = n.title, description = n.description,
@@ -1310,40 +1457,40 @@ BEGIN
     -- new assignee's assignment notice already cover those)
     IF n.status IS DISTINCT FROM o.status THEN
         INSERT INTO board.task_notice (task_id, handle, line)
-        SELECT DISTINCT ON (r.handle) o.id, r.handle, format('[board] task #%s "%s" moved %s -> %s by %s%s%s -- see it with: board task %s',
-               o.id, n.title, o.status, n.status, me,
-               CASE WHEN r.why = 'parent' THEN format(' (subtask of #%s "%s")', p.id, p.title) ELSE '' END,
+        SELECT DISTINCT ON (r.handle) o.id, r.handle, format('[board] task %s "%s" moved %s -> %s by %s%s%s -- see it with: board task %s',
+               board.task_ref(o.id), n.title, o.status, n.status, me,
+               CASE WHEN r.why = 'parent' THEN format(' (subtask of %s "%s")', board.task_ref(p.id), p.title) ELSE '' END,
                CASE WHEN nullif(btrim(task_update.note), '') IS NOT NULL
                     THEN ': "' || left(regexp_replace(btrim(task_update.note), '\s+', ' ', 'g'), 150)
                          || CASE WHEN length(btrim(task_update.note)) > 150 THEN '…' ELSE '' END || '"' ELSE '' END,
-               o.id)
+               o.id) || CASE WHEN answered THEN ' -- this answers its escalation (cleared): act on it, and escalate again (--human) only if the human is still needed' ELSE '' END
         FROM (SELECT 1) one
         LEFT JOIN board.task p ON p.id = n.parent_id
         CROSS JOIN LATERAL (VALUES (n.assignee, 'task'), (n.created_by, 'task'),
                                    (CASE WHEN n.status IN ('done', 'cancelled') THEN p.assignee END, 'parent'),
                                    (CASE WHEN n.status IN ('done', 'cancelled') THEN p.created_by END, 'parent'),
-                                   (CASE WHEN n.status IN ('done', 'cancelled') THEN (SELECT pm FROM board.policy) END, 'task')) r(handle, why)
+                                   (CASE WHEN n.status IN ('done', 'cancelled') OR answered THEN (SELECT pm FROM board.policy) END, 'task')) r(handle, why)
         JOIN board.agent a ON a.handle = r.handle AND a.kind = 'agent'
         WHERE r.handle <> me
           AND NOT (r.handle = n.assignee AND n.assignee IS DISTINCT FROM o.assignee)
-          AND NOT (r.handle = (SELECT pm FROM board.policy) AND n.status IN ('blocked', 'review'))
+          AND NOT (r.handle = (SELECT pm FROM board.policy) AND n.status IN ('blocked', 'review') AND NOT answered)
         ORDER BY r.handle, r.why;  -- 'parent' first: one line per person, with the subtask context
     ELSIF (SELECT kind FROM board.agent WHERE handle = me) = 'human' THEN
         -- a human's note or edit (an approval, an answer, a correction) must reach the agents who own the
         -- task; agents' own notes stay silent (progress reports)
         INSERT INTO board.task_notice (task_id, handle, line)
-        SELECT DISTINCT o.id, r.handle, format('[board] task #%s "%s": %s %s%s -- see it with: board task %s',
-               o.id, n.title, me,
+        SELECT DISTINCT o.id, r.handle, format('[board] task %s "%s": %s %s%s -- see it with: board task %s',
+               board.task_ref(o.id), n.title, me,
                CASE WHEN nullif(btrim(task_update.note), '') IS NOT NULL
                     THEN 'noted "' || left(regexp_replace(btrim(task_update.note), '\s+', ' ', 'g'), 200)
                          || CASE WHEN length(btrim(task_update.note)) > 200 THEN '…' ELSE '' END || '"' ELSE 'edited it' END,
                CASE WHEN cardinality(changes) > 0 THEN ' (' || array_to_string(changes, '; ') || ')' ELSE '' END,
-               o.id)
-        FROM (VALUES (n.assignee), (n.created_by)) r(handle)
+               o.id) || CASE WHEN answered THEN ' -- this answers its escalation (cleared): act on it, and escalate again (--human) only if the human is still needed' ELSE '' END
+        FROM (VALUES (n.assignee), (n.created_by), (CASE WHEN answered THEN (SELECT pm FROM board.policy) END)) r(handle)
         JOIN board.agent a ON a.handle = r.handle AND a.kind = 'agent'
         WHERE NOT (r.handle = n.assignee AND n.assignee IS DISTINCT FROM o.assignee);
     END IF;
-    RETURN format('task #%s updated%s', o.id, CASE WHEN cardinality(changes) > 0 THEN ' (' || array_to_string(changes, '; ') || ')' ELSE ': note added' END);
+    RETURN format('task %s updated%s', board.task_ref(o.id), CASE WHEN cardinality(changes) > 0 THEN ' (' || array_to_string(changes, '; ') || ')' ELSE ': note added' END);
 END $$;
 
 CREATE OR REPLACE FUNCTION api.task_link(id bigint, thread bigint, unlink boolean DEFAULT false) RETURNS api."text/plain"
@@ -1355,10 +1502,10 @@ BEGIN
     IF th IS NULL THEN RAISE EXCEPTION 'message #% not found', task_link.thread; END IF;
     IF unlink THEN
         DELETE FROM board.task_thread x WHERE x.task_id = task_link.id AND x.thread_id = th;
-        RETURN format('thread #%s unlinked from task #%s', th, task_link.id);
+        RETURN format('thread #%s unlinked from task %s', th, board.task_ref(task_link.id));
     END IF;
     INSERT INTO board.task_thread (task_id, thread_id, linked_by) VALUES (task_link.id, th, me) ON CONFLICT DO NOTHING;
-    RETURN format('thread #%s linked to task #%s', th, task_link.id);
+    RETURN format('thread #%s linked to task %s', th, board.task_ref(task_link.id));
 END $$;
 
 -- a task with its path, description, subtasks, threads and log
@@ -1371,7 +1518,7 @@ BEGIN
     IF NOT FOUND THEN RETURN format('task #%s not found', task.id); END IF;
     WITH RECURSIVE up AS (SELECT x.id, x.parent_id, x.title, 0 AS d FROM board.task x WHERE x.id = t.parent_id
                           UNION ALL SELECT p.id, p.parent_id, p.title, up.d + 1 FROM board.task p JOIN up ON p.id = up.parent_id)
-    SELECT string_agg(format('#%s %s', up.id, up.title), ' > ' ORDER BY up.d DESC) INTO path FROM up;
+    SELECT string_agg(format('%s %s', board.task_ref(up.id), up.title), ' > ' ORDER BY up.d DESC) INTO path FROM up;
     SELECT string_agg(board.fmt_task(c, 1), E'\n' ORDER BY c.status = 'done', c.position, c.id) INTO subs
     FROM board.task c WHERE c.parent_id = t.id AND c.status <> 'cancelled';
     SELECT string_agg(format('  #%s "%s"  %s%s', x.thread_id, x.subject, upper(coalesce(x.status, 'unsummarized')),
@@ -1391,6 +1538,16 @@ BEGIN
         E'\nLog (latest 15):', coalesce(log, '  (empty)'),
         E'\n-- note: board task note ' || t.id || ' -m "..." | status: board task update ' || t.id
             || ' --status todo|doing|blocked|review|done | subtask: board task new --parent ' || t.id || ' --title "..." --assignee H');
+END $$;
+
+-- a task reference ("#119/3", "119/3", "#119/", "151") -> its id, for the CLI (error if none)
+CREATE OR REPLACE FUNCTION api.task_id(ref text) RETURNS api."text/plain"
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = board, public AS $$
+DECLARE i bigint := board.task_resolve(ref);
+BEGIN
+    PERFORM board.require_me();
+    IF i IS NULL THEN RAISE EXCEPTION 'task % not found', ref; END IF;
+    RETURN i::text;
 END $$;
 
 -- open tasks as a tree (mine: tasks assigned to me, with their subtasks)
@@ -1500,8 +1657,11 @@ $$;
 -- The watcher's health report + task fetch (every poll). Returns plain text: empty, or one line
 --   login<TAB>ID<TAB>STATE<TAB>CODE
 -- for this agent's active login request (CODE only while state = code_submitted).
+-- model / claude_version: the session's Claude model and Claude Code version (watcher v13+; NULL = unchanged).
+DROP FUNCTION IF EXISTS api.watch_sync(text, text, integer);
 CREATE OR REPLACE FUNCTION api.watch_sync(session_state text DEFAULT NULL, session_detail text DEFAULT NULL,
-                                          version integer DEFAULT NULL)
+                                          version integer DEFAULT NULL, model text DEFAULT NULL,
+                                          claude_version text DEFAULT NULL)
 RETURNS api."text/plain" LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = board, public AS $$
 DECLARE me text := board.require_me(); l board.login_request;
 BEGIN
@@ -1515,7 +1675,11 @@ BEGIN
         session_detail = CASE WHEN watch_sync.session_state IS NOT NULL THEN left(watch_sync.session_detail, 1000)
                               ELSE a.session_detail END,
         session_checked_at = CASE WHEN watch_sync.session_state IS NOT NULL THEN now() ELSE a.session_checked_at END,
-        watcher_version = coalesce(version, a.watcher_version), last_seen_at = now()
+        watcher_version = coalesce(version, a.watcher_version), last_seen_at = now(),
+        claude_model = coalesce(left(nullif(model, ''), 100), a.claude_model),
+        claude_version = coalesce(left(nullif(watch_sync.claude_version, ''), 40), a.claude_version),
+        claude_info_at = CASE WHEN nullif(model, '') IS NOT NULL OR nullif(watch_sync.claude_version, '') IS NOT NULL
+                              THEN now() ELSE a.claude_info_at END
     WHERE a.handle = me;
     PERFORM board.expire_logins();
     SELECT * INTO l FROM board.login_request x
@@ -1638,7 +1802,7 @@ FROM board.thread_summary s JOIN board.message m ON m.id = s.thread_id
 WHERE s.needs_human AND s.status IS DISTINCT FROM 'closed'
 UNION ALL
 SELECT format('task:%s:%s', t.id, md5(coalesce(t.human_reason, ''))), 'task:' || t.id, NULL, t.updated_at,
-       format('Task #%s needs you: %s', t.id, t.title), coalesce(left(t.human_reason, 240), ''), '/tasks/' || t.id
+       format('Task %s needs you: %s', board.task_ref(t.id), t.title), coalesce(left(t.human_reason, 240), ''), '/tasks/' || t.path
 FROM board.task t
 WHERE t.needs_human AND t.status NOT IN ('done', 'cancelled')
 UNION ALL
@@ -1736,7 +1900,7 @@ END $$;
 GRANT USAGE ON SCHEMA api TO board_anon, board_agent, board_admin;
 REVOKE ALL ON ALL TABLES IN SCHEMA api FROM board_anon, board_agent, board_admin;
 GRANT SELECT ON api.agents, api.messages, api.threads, api.tags, api.systems,
-                api.tasks, api.task_notes, api.task_threads, api.thread_links, api.docs, api.doc_versions
+                api.tasks, api.task_notes, api.task_threads, api.task_escalations, api.message_stats, api.thread_links, api.docs, api.doc_versions
       TO board_agent, board_admin;
 GRANT SELECT ON api.invites, api.login_requests TO board_admin;
 
@@ -1753,8 +1917,8 @@ GRANT EXECUTE ON FUNCTION api.update_profile(text, text, text, text, text, text,
                           api.summarize(bigint, text, text, boolean, text, bigint), api.summaries(boolean, integer),
                           api.search(text, text, text, text, text, timestamptz, timestamptz, integer),
                           api.directory(), api.whoami(),
-                          api.watch_sync(text, text, integer), api.login_progress(bigint, text, text, text, text),
-                          api.task_create(text, text, text, bigint, text, text, text),
+                          api.watch_sync(text, text, integer, text, text), api.login_progress(bigint, text, text, text, text),
+                          api.task_create(text, text, text, bigint, text, text, text), api.task_id(text),
                           api.task_update(bigint, text, text, text, text, text, bigint, text, text, boolean, text, double precision),
                           api.task_link(bigint, bigint, boolean), api.task(bigint), api.task_list(boolean, text, boolean),
                           api.push_key(), api.push_subscribe(text, text, text, text), api.push_unsubscribe(text),

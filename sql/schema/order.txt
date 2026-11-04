@@ -29,6 +29,7 @@ api.summaries.boolean,.integer.FUNCTION.sql
 api.summarize.bigint,.text,.text,.boolean,.text,.bigint.FUNCTION.sql
 api.task.bigint.FUNCTION.sql
 api.task_create.text,.text,.text,.bigint,.text,.text,.text.FUNCTION.sql
+api.task_id.text.FUNCTION.sql
 api.task_link.bigint,.bigint,.boolean.FUNCTION.sql
 api.task_list.boolean,.text,.boolean.FUNCTION.sql
 api.task_update.bigint,.text,.text,.text,.text,.text,.bigint,.text,.text,.boolean,.text,.double.precision.FUNCTION.sql
@@ -36,7 +37,7 @@ api.thread.bigint.FUNCTION.sql
 api.thread_link.bigint,.bigint,.text,.boolean.FUNCTION.sql
 api.thread_lock.bigint,.text,.boolean.FUNCTION.sql
 api.update_profile.text,.text,.text,.text,.text,.text,.text,.text.FUNCTION.sql
-api.watch_sync.text,.text,.integer.FUNCTION.sql
+api.watch_sync.text,.text,.integer,.text,.text.FUNCTION.sql
 api.whoami.FUNCTION.sql
 board.b64url.bytea.FUNCTION.sql
 board.check_budget.text,.bigint,.boolean.FUNCTION.sql
@@ -52,6 +53,7 @@ board.fmt_task.board.task,.integer.FUNCTION.sql
 board.fmt_ts.timestamp.with.time.zone.FUNCTION.sql
 board.is_admin.FUNCTION.sql
 board.me.FUNCTION.sql
+board.message_human_answered.FUNCTION.sql
 board.message_thread.FUNCTION.sql
 board.push_due.FUNCTION.sql
 board.require_admin.FUNCTION.sql
@@ -62,6 +64,10 @@ board.split_list.text.FUNCTION.sql
 board.task_can_edit.bigint,.text.FUNCTION.sql
 board.task_human_answered.bigint.FUNCTION.sql
 board.task_interval.text.FUNCTION.sql
+board.task_path_ins.FUNCTION.sql
+board.task_path_move.FUNCTION.sql
+board.task_ref.bigint.FUNCTION.sql
+board.task_resolve.text.FUNCTION.sql
 board.task_status.text.FUNCTION.sql
 board.token_for.text,.interval.FUNCTION.sql
 board.agent.TABLE.sql
@@ -75,16 +81,18 @@ board.invite.TABLE.sql
 api.invites.VIEW.sql
 board.login_request.TABLE.sql
 api.login_requests.VIEW.sql
+board.task_thread.TABLE.sql
+api.message_stats.VIEW.sql
 api.messages.VIEW.sql
 api.systems.VIEW.sql
 api.tags.VIEW.sql
 board.task_note.TABLE.sql
+api.task_escalations.VIEW.sql
 api.task_notes.VIEW.sql
 board.policy.TABLE.sql
 board.thread_lock.TABLE.sql
 board.thread_summary.TABLE.sql
 api.threads.VIEW.sql
-board.task_thread.TABLE.sql
 api.task_threads.VIEW.sql
 api.tasks.VIEW.sql
 board.thread_link.TABLE.sql
@@ -97,6 +105,7 @@ board.push_config.TABLE.sql
 board.push_sent.TABLE.sql
 board.push_subscription.TABLE.sql
 board.secret.TABLE.sql
+board.task_alias.TABLE.sql
 board.task_id_seq.SEQUENCE.sql
 board.task_note_id_seq.SEQUENCE.sql
 board.task_notice.TABLE.sql
@@ -114,6 +123,7 @@ board.push_sent.push_sent_pkey.CONSTRAINT.sql
 board.push_subscription.push_subscription_pkey.CONSTRAINT.sql
 board.recipient.recipient_pkey.CONSTRAINT.sql
 board.secret.secret_pkey.CONSTRAINT.sql
+board.task_alias.task_alias_pkey.CONSTRAINT.sql
 board.task_note.task_note_pkey.CONSTRAINT.sql
 board.task_notice.task_notice_pkey.CONSTRAINT.sql
 board.task.task_pkey.CONSTRAINT.sql
@@ -135,9 +145,13 @@ board.task_assignee_idx.INDEX.sql
 board.task_note_task_idx.INDEX.sql
 board.task_notice_pending_idx.INDEX.sql
 board.task_parent_idx.INDEX.sql
+board.task_path_idx.INDEX.sql
 board.task_thread_thread_idx.INDEX.sql
 board.thread_link_other_idx.INDEX.sql
+board.message.message_human_answered.TRIGGER.sql
 board.message.message_thread.TRIGGER.sql
+board.task.task_path_ins.TRIGGER.sql
+board.task.task_path_move.TRIGGER.sql
 board.doc.doc_created_by_fkey.FK.CONSTRAINT.sql
 board.doc.doc_updated_by_fkey.FK.CONSTRAINT.sql
 board.doc_version.doc_version_doc_id_fkey.FK.CONSTRAINT.sql
@@ -151,6 +165,7 @@ board.push_sent.push_sent_handle_fkey.FK.CONSTRAINT.sql
 board.push_subscription.push_subscription_handle_fkey.FK.CONSTRAINT.sql
 board.recipient.recipient_handle_fkey.FK.CONSTRAINT.sql
 board.recipient.recipient_message_id_fkey.FK.CONSTRAINT.sql
+board.task_alias.task_alias_task_id_fkey.FK.CONSTRAINT.sql
 board.task.task_assignee_fkey.FK.CONSTRAINT.sql
 board.task.task_created_by_fkey.FK.CONSTRAINT.sql
 board.task_note.task_note_author_fkey.FK.CONSTRAINT.sql
@@ -198,6 +213,7 @@ api.FUNCTION.summaries.pending.boolean,.lim.integer.ACL.sql
 api.FUNCTION.summarize.id.bigint,.status.text,.summary.text,.needs_human.boolean,.human_reason.text,.through.bigint.ACL.sql
 api.FUNCTION.task.id.bigint.ACL.sql
 api.FUNCTION.task_create.title.text,.description.text,.assignee.text,.parent.bigint,.status.text,.check_every.text,.due.text.ACL.sql
+api.FUNCTION.task_id.ref.text.ACL.sql
 api.FUNCTION.task_link.id.bigint,.thread.bigint,.unlink.boolean.ACL.sql
 api.FUNCTION.task_list.include_closed.boolean,.assignee.text,.mine.boolean.ACL.sql
 api.FUNCTION.task_update.id.bigint,.status.text,.note.text,.assignee.text,.title.text,.description.text,.parent.bigint,.check_every.text,.due.text,.needs_human.boolean,.human_reason.text,.position.double.precision.ACL.sql
@@ -205,7 +221,7 @@ api.FUNCTION.thread.id.bigint.ACL.sql
 api.FUNCTION.thread_link.id.bigint,.other.bigint,.kind.text,.unlink.boolean.ACL.sql
 api.FUNCTION.thread_lock.id.bigint,.reason.text,.unlock.boolean.ACL.sql
 api.FUNCTION.update_profile.system.text,.description.text,.responsibilities.text,.goals.text,.host.text,.tmux_target.text,.display_name.text,.claude_ui_url.text.ACL.sql
-api.FUNCTION.watch_sync.session_state.text,.session_detail.text,.version.integer.ACL.sql
+api.FUNCTION.watch_sync.session_state.text,.session_detail.text,.version.integer,.model.text,.claude_version.text.ACL.sql
 api.FUNCTION.whoami.ACL.sql
 board.FUNCTION.b64url.b.bytea.ACL.sql
 board.FUNCTION.check_budget.me.text,.thread.bigint,.bcast.boolean.ACL.sql
@@ -219,6 +235,7 @@ board.FUNCTION.fmt_task.t.board.task,.indent.integer.ACL.sql
 board.FUNCTION.fmt_ts.t.timestamp.with.time.zone.ACL.sql
 board.FUNCTION.is_admin.ACL.sql
 board.FUNCTION.me.ACL.sql
+board.FUNCTION.message_human_answered.ACL.sql
 board.FUNCTION.message_thread.ACL.sql
 board.FUNCTION.push_due.ACL.sql
 board.FUNCTION.require_admin.ACL.sql
@@ -229,6 +246,10 @@ board.FUNCTION.split_list.s.text.ACL.sql
 board.FUNCTION.task_can_edit.t.bigint,.me.text.ACL.sql
 board.FUNCTION.task_human_answered.t.bigint.ACL.sql
 board.FUNCTION.task_interval.s.text.ACL.sql
+board.FUNCTION.task_path_ins.ACL.sql
+board.FUNCTION.task_path_move.ACL.sql
+board.FUNCTION.task_ref.id.bigint.ACL.sql
+board.FUNCTION.task_resolve.ref.text.ACL.sql
 board.FUNCTION.task_status.s.text.ACL.sql
 board.FUNCTION.token_for.h.text,.ttl.interval.ACL.sql
 api.TABLE.agents.ACL.sql
@@ -236,9 +257,11 @@ api.TABLE.doc_versions.ACL.sql
 api.TABLE.docs.ACL.sql
 api.TABLE.invites.ACL.sql
 api.TABLE.login_requests.ACL.sql
+api.TABLE.message_stats.ACL.sql
 api.TABLE.messages.ACL.sql
 api.TABLE.systems.ACL.sql
 api.TABLE.tags.ACL.sql
+api.TABLE.task_escalations.ACL.sql
 api.TABLE.task_notes.ACL.sql
 api.TABLE.threads.ACL.sql
 api.TABLE.task_threads.ACL.sql

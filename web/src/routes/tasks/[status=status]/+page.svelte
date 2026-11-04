@@ -1,18 +1,22 @@
 <script lang="ts">
 	import { page } from '$app/state';
+	import { mdTeaser } from '#lib/links.ts';
 	import { goto } from '$app/navigation';
-	import { api, ago, TASK_STATUSES, TASK_LABEL, type Task, type TaskStatus, type Agent } from '#lib/api.svelte.ts';
+	import { api, ago, TASK_STATUSES, TASK_LABEL, type Task, type TaskStatus, type Agent, taskRef, taskHref } from '#lib/api.svelte.ts';
 	import { every, REFRESH_MS } from '#lib/poll.ts';
 	import { groupTree } from '#lib/tasktree.ts';
 
 	// /tasks/<status>: the tasks in one status, one column per project (top-level task tree).
-	// ?who=HANDLE narrows to one assignee, as on /tasks.
+	// ?who=HANDLE narrows to one assignee, ?root=ID[,ID...] / ?not=ID[,ID...] show / hide project trees, as on /tasks.
 	let tasks = $state<Task[]>([]);
 	let agents = $state<Agent[]>([]);
 	let error = $state('');
 
 	const status = $derived(page.params.status as TaskStatus);
 	const who = $derived(page.url.searchParams.get('who') ?? '');
+	const ids = (k: string) => (page.url.searchParams.get(k) ?? '').split(',').map(Number).filter((n) => n > 0);
+	const incl = $derived(ids('root'));
+	const excl = $derived(ids('not'));
 
 	// all tasks, cancelled included: a task's project is found through its ancestors, whatever their status
 	const load = () =>
@@ -33,17 +37,25 @@
 		for (let x = t.parent_id ? byId.get(t.parent_id) : undefined; x; x = x.parent_id ? byId.get(x.parent_id) : undefined) out.unshift(x);
 		return out;
 	};
+	function under(t: Task, r: number): boolean {
+		for (let x: Task | undefined = t; x; x = x.parent_id ? byId.get(x.parent_id) : undefined) if (x.id === r) return true;
+		return false;
+	}
+	const inScope = (t: Task) => (!who || t.assignee === who) && (!incl.length || incl.some((r) => under(t, r))) && !excl.some((r) => under(t, r));
+	const scopeLabel = $derived(
+		[incl.length ? `only ${incl.map((id) => byId.get(id)?.title.split(/ \(|:/)[0].trim() ?? `#${id}`).join(', ')}` : '',
+		 excl.length ? `except ${excl.map((id) => byId.get(id)?.title.split(/ \(|:/)[0].trim() ?? `#${id}`).join(', ')}` : ''].filter(Boolean).join(', '));
 	// same colour per project as on /tasks
 	const hue = (id: number) => Math.round((id * 137.508) % 360);
 	const color = (id: number) => `hsl(${hue(id)} 65% 50%)`;
 
 	const counts = $derived(
-		Object.fromEntries([...TASK_STATUSES, 'cancelled'].map((s) => [s, tasks.filter((t) => t.status === s && (!who || t.assignee === who)).length]))
+		Object.fromEntries([...TASK_STATUSES, 'cancelled'].map((s) => [s, tasks.filter((t) => t.status === s && inScope(t)).length]))
 	);
 	const projects = $derived.by(() => {
 		const cols = new Map<number, { root: Task; items: Task[] }>();
 		for (const t of tasks) {
-			if (t.status !== status || (who && t.assignee !== who)) continue;
+			if (t.status !== status || !inScope(t)) continue;
 			const r = rootOf(t);
 			if (!cols.has(r.id)) cols.set(r.id, { root: r, items: [] });
 			cols.get(r.id)!.items.push(t);
@@ -56,11 +68,16 @@
 		if (v) q.set('who', v); else q.delete('who');
 		goto(`/tasks/${status}${q.size ? `?${q}` : ''}`);
 	}
-	const qs = $derived(who ? `?who=${encodeURIComponent(who)}` : '');
+	// who / root / not carry over to the tabs and back to the board
+	const qs = $derived.by(() => {
+		const q = new URLSearchParams();
+		for (const k of ['who', 'root', 'not']) { const v = page.url.searchParams.get(k); if (v) q.set(k, v); }
+		return q.size ? `?${q}` : '';
+	});
 </script>
 
 <div class="head">
-	<h1><a href="/tasks{qs}">Tasks</a> <span class="muted">› {TASK_LABEL[status]}</span></h1>
+	<h1><a href="/tasks{qs}">Tasks</a> <span class="muted">› {TASK_LABEL[status]}{#if scopeLabel}{' · '}{scopeLabel}{/if}</span></h1>
 	<select value={who} onchange={(e) => setWho(e.currentTarget.value)}>
 		<option value="">Everyone</option>
 		{#each agents as a}<option value={a.handle}>{a.handle}</option>{/each}
@@ -80,13 +97,13 @@
 <div class="board">
 	{#each projects as p (p.root.id)}
 		<section class="col" style="--proj: {color(p.root.id)}" aria-label="project #{p.root.id}">
-			<h2><a href="/tasks?root={p.root.id}" title="this project on the board"><span class="sw"></span>#{p.root.id} {p.root.title}</a>
+			<h2><a href="/tasks?root={p.root.id}" title="this project on the board"><span class="sw"></span>#{p.root.id}/ {p.root.title}</a>
 				<span class="muted">{p.items.length}</span></h2>
 			{#each groupTree(p.items, byId) as { t, depth } (t.id)}
-				<a class="card panel" class:sub={depth > 0} style="--depth: {depth}" href="/tasks/{t.id}" class:human={t.needs_human}>
+				<a class="card panel" class:sub={depth > 0} style="--depth: {depth}" href={taskHref(t)} class:human={t.needs_human}>
 					{#if path(t).length > 1 && !depth}<div class="path muted">{path(t).slice(1).map((x) => x.title).join(' › ')}</div>{/if}
-					<div class="title"><span class="muted">#{t.id}</span> {t.title}</div>
-					{#if t.needs_human}<div class="reason">Needs you: {t.human_reason}</div>{/if}
+					<div class="title"><span class="muted">{taskRef(t)}</span> {t.title}</div>
+					{#if t.needs_human}<div class="reason">Needs you: {mdTeaser(t.human_reason ?? '')}</div>{/if}
 					<div class="meta">
 						<span class="chip" class:none={!t.assignee}>{t.assignee ?? 'unassigned'}</span>
 						{#if t.subtasks}<span class="muted" title="subtasks done">☑ {t.subtasks_done}/{t.subtasks}</span>{/if}
@@ -123,7 +140,7 @@
 	.card.sub { margin-left: calc(var(--depth) * 0.9rem); margin-top: -0.25rem; }
 	.path { font-size: 0.72rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 	.title { font-weight: 600; line-height: 1.3; }
-	.reason { color: #d9480f; font-size: 0.78rem; font-weight: 500; }
+	.reason { color: #d9480f; font-size: 0.78rem; font-weight: 500; display: -webkit-box; -webkit-line-clamp: 3; line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 	.meta { display: flex; gap: 0.5rem; align-items: center; font-size: 0.75rem; }
 	.chip.none { background: transparent; border: 1px dashed var(--line); color: var(--muted); }
 	.spacer { flex: 1; }

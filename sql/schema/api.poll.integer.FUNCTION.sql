@@ -57,8 +57,8 @@ BEGIN
         WHERE t.assignee = me AND t.assignee_notified_at IS NULL AND t.status NOT IN ('done', 'cancelled')
         RETURNING t.*
     )
-    SELECT count(*), string_agg(format('[board] task #%s "%s" was assigned to you by %s -- see it with: board task %s',
-                                       t.id, t.title, coalesce(w.author, t.created_by), t.id), E'\n' ORDER BY t.id)
+    SELECT count(*), string_agg(format('[board] task %s "%s" was assigned to you by %s -- see it with: board task %s',
+                                       board.task_ref(t.id), t.title, coalesce(w.author, t.created_by), t.id), E'\n' ORDER BY t.id)
     INTO tn, tlines
     FROM taken t
     LEFT JOIN LATERAL (SELECT n.author FROM board.task_note n WHERE n.task_id = t.id AND n.change ~ 'assign' ORDER BY n.id DESC LIMIT 1) w ON true
@@ -90,8 +90,8 @@ BEGIN
             UPDATE board.task t SET pm_prompted_at = now() FROM due WHERE t.id = due.id RETURNING t.*
         )
         SELECT count(*), string_agg(format(
-                   '[board] task #%s "%s" [%s, @%s]: %s -- check in: board task %s, then nudge the assignee, re-assign/split it, or escalate (board task update %s --human "WHY")',
-                   t.id, t.title, t.status, coalesce(t.assignee, 'unassigned'),
+                   '[board] task %s "%s" [%s, @%s]: %s -- check in: board task %s, then nudge the assignee, re-assign/split it, or escalate (board task update %s --human "WHY")',
+                   board.task_ref(t.id), t.title, t.status, coalesce(t.assignee, 'unassigned'),
                    CASE WHEN t.status IN ('blocked', 'review') AND t.activity_at >= now() - t.check_every
                         THEN 'moved to ' || t.status
                         WHEN t.status = 'ongoing'
@@ -112,7 +112,7 @@ BEGIN
                       AND (NOT t.needs_human OR board.task_human_answered(t.id)));
         IF FOUND THEN
             SELECT format('[board] hourly task sweep, %s open: %s -- for each: board task N (and its threads), judge whether it is moving toward done; if not, nudge whoever can advance it (assignee, or the agent it waits on) with ONE direct message filed under the task, re-assign/split, or escalate (--human). Skip tasks that are moving; note what you checked.',
-                          count(*), string_agg(format('#%s %s @%s %s%s', t.id, t.status, coalesce(t.assignee, '-'),
+                          count(*), string_agg(format('%s %s @%s %s%s', board.task_ref(t.id), t.status, coalesce(t.assignee, '-'),
                                                       board.fmt_age(now() - t.activity_at),
                                                       CASE WHEN t.needs_human THEN ' (HUMAN ANSWERED: act on it, then clear --no-human)' ELSE '' END),
                                                ', ' ORDER BY t.needs_human DESC, t.activity_at))

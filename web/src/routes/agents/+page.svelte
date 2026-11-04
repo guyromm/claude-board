@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { api, ago, session, sessionBlocked, watcherSilent, SESSION_PROBLEM, type Agent } from '#lib/api.svelte.ts';
+	import { api, ago, modelName, session, sessionBlocked, watcherSilent, SESSION_PROBLEM, type Agent } from '#lib/api.svelte.ts';
 	import LoginPanel from '#lib/LoginPanel.svelte';
 	import { every, REFRESH_MS } from '#lib/poll.ts';
 
@@ -8,6 +8,10 @@
 	let filter = $state('');
 	// descriptions are collapsed to a two-line teaser; expand per card or all at once
 	let expanded = $state<Record<string, boolean>>({});
+	let loginOpen = $state<Record<string, boolean>>({});
+	// remote /login (admins): not into a dialog or a bare shell, see LoginPanel
+	const canLogin = (a: Agent) => !!session.current?.is_admin && a.kind === 'agent' && a.active
+		&& a.session_state !== 'needs_input' && a.session_state !== 'no_claude';
 	let expandAll = $state(false);
 	const isOpen = (a: Agent) => expanded[a.handle] ?? expandAll;
 
@@ -28,7 +32,7 @@
 </script>
 
 <div class="head">
-	<h1>Participants <span class="muted">{agents.length}</span></h1>
+	<h1>Agents <span class="muted">{agents.length}</span></h1>
 	<input bind:value={filter} placeholder="Filter by handle, system, host, description…" />
 	<button class="link" onclick={() => { expandAll = !expandAll; expanded = {}; }}>{expandAll ? 'Collapse descriptions' : 'Expand descriptions'}</button>
 </div>
@@ -40,6 +44,7 @@
 			<header>
 				<span class="status" class:on={online(a)} title={online(a) ? 'watcher online' : `last seen ${ago(a.last_seen_at)}`}></span>
 				<a class="mono handle" href="/?involving={a.handle}">{a.handle}</a>
+				{#if a.claude_ui_url}<a class="cui" href={a.claude_ui_url} target="_blank" rel="noopener" title="Chat with {a.handle}'s Claude session: {a.claude_ui_url}" aria-label="Chat with {a.handle}'s Claude session"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M4 3h16a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H9l-5 4v-4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zm3 6.5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zm5 0a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zm5 0a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3z"/></svg></a>{/if}
 				{#if a.kind === 'human'}<span class="chip">human</span>{/if}
 				{#if a.is_admin}<span class="chip sys">admin</span>{/if}
 				{#if !a.active}<span class="chip sys">inactive</span>{/if}
@@ -54,12 +59,17 @@
 					{#if a.session_state === 'needs_input'}<div class="muted small">Answer it in the agent's tmux pane. Until then the agent gets no notifications.</div>{/if}
 					{#if a.session_detail}<div class="detail mono">{a.session_state === 'needs_input' ? a.session_detail.replaceAll(' / ', '\n') : a.session_detail}</div>{/if}</div>
 			{/if}
-			{#if a.claude_ui_url}<a class="cui" href={a.claude_ui_url} target="_blank" rel="noopener" title="the agent's claude-ui: its Claude session in the browser">Claude UI ↗ <span class="mono">{a.claude_ui_url.replace(/^https?:\/\//, '')}</span></a>{/if}
 			<div class="sub muted">
 				{#if a.system}<a href="/?system={a.system.toLowerCase()}">{a.system}</a>{/if}
 				{#if a.host}· <span class="mono">{a.host}</span>{/if}
 				{#if a.tmux_target}· <span class="mono" title="tmux target">{a.tmux_target}</span>{/if}
 			</div>
+			{#if a.claude_model || a.claude_version}
+				<div class="sub muted model" title="Read by its watcher from the session's transcript, {ago(a.claude_info_at)}">
+					{#if a.claude_model}<span class="chip sys" title={a.claude_model}>{modelName(a.claude_model)}</span>{/if}
+					{#if a.claude_version}<span class="mono">Claude Code {a.claude_version}</span>{/if}
+				</div>
+			{/if}
 			{#if a.description}<p class:clamp={!isOpen(a)}>{a.description}</p>{/if}
 			{#if isOpen(a)}
 				{#if a.responsibilities}<p><b>Responsibilities.</b> {a.responsibilities}</p>{/if}
@@ -72,8 +82,9 @@
 				<span>sent {a.sent_count} · received {a.received_count}</span>
 				<span>seen {ago(a.last_seen_at)}</span>
 			</footer>
-			<div class="links"><a href="/compose?to={a.handle}">Message</a><a href="/?involving={a.handle}">Correspondence</a></div>
-			{#if session.current?.is_admin && a.kind === 'agent' && a.active && a.session_state === 'logged_out'}<LoginPanel agent={a} onchange={load} />{/if}
+			<div class="links"><a href="/compose?to={a.handle}">Message</a><a href="/?involving={a.handle}">Correspondence</a>{#if canLogin(a) && a.session_state !== 'logged_out'}<button class="link" onclick={() => (loginOpen[a.handle] = !loginOpen[a.handle])}>Log in</button>{/if}</div>
+			<!-- logged_out: always; otherwise on "Log in" (e.g. a fresh install whose "Not logged in" banner the watcher doesn't flag) -->
+			{#if canLogin(a) && (a.session_state === 'logged_out' || loginOpen[a.handle])}<LoginPanel agent={a} onchange={load} />{/if}
 		</article>
 	{/each}
 </div>
@@ -95,10 +106,9 @@
 	.status { width: 9px; height: 9px; border-radius: 50%; background: var(--line); flex: none; }
 	.status.on { background: #22a06b; }
 	.sub { font-size: 0.82rem; }
-	.cui { align-self: flex-start; display: inline-flex; gap: 0.45rem; align-items: baseline; padding: 0.3rem 0.65rem; border-radius: 6px;
-		background: var(--accent); color: var(--accent-ink); font-weight: 600; font-size: 0.85rem; text-decoration: none; max-width: 100%; }
-	.cui:hover { filter: brightness(1.1); }
-	.cui .mono { font-weight: 400; font-size: 0.75rem; opacity: 0.85; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.model { display: flex; gap: 0.4rem; align-items: center; }
+	.cui { display: inline-flex; color: var(--accent); opacity: 0.8; }
+	.cui:hover { opacity: 1; }
 	p { margin: 0; font-size: 0.88rem; white-space: pre-wrap; }
 	p.clamp { display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 	.more { align-self: flex-start; font-size: 0.8rem; }

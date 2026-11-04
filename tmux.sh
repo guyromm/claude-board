@@ -73,6 +73,10 @@ tmux_run_in_pane() {
     tmux list-windows -t "$session" -F "#{window_name}" 2>/dev/null | grep -qx "$win" || tnw "$win"
     local pid; pid=$(tmux split-window -v -P -F '#{pane_id}' -t "$session:$win" "${cmd}; exec bash")
     tmux select-pane -t "$pid" -T "$title"
+    # start/stop/workers find a worker's pane by its title: don't let the program (claude sets the
+    # terminal title, OSC 0/2) rename it. allow-rename only covers WINDOW names. Newer tmux only (3.6a has
+    # it, 3.4 does not): older ones ignore it, silently
+    tmux set-option -p -t "$pid" allow-set-title off 2>/dev/null
     tmux select-layout -t "$session:$win" tiled
     echo "${title}:${pid}" >> "$PANE_MAP_FILE"
     tmux pipe-pane -t "$pid" -o "cat >> $LOGDIR/${title}.log"
@@ -117,6 +121,7 @@ all()   { echo "== workers =="; workers; echo "== panes =="; panes; }
 
 # START_ALL derives from the REGISTRY minus an explicit opt-out list (adding a worker starts it by default)
 WORKER_OPTOUT=(
+  postgrest                 # the session's first window, started by create()
   claude                    # the agent pane itself, started by the bringup flow
   ui-prod                   # deliberate fallback only; ui (vite dev) is the live server
 )
@@ -201,16 +206,20 @@ else
       up)
         destroy
         create
-        start ui
-        start push
+        start_all                # every registered worker except WORKER_OPTOUT
         tnw claude; tmux send-keys -t "$session:claude" "${WORKERS[claude]}" Enter
+        # the board watcher (notifications into the claude pane): not a WORKERS entry, `board` owns its loop
+        [ -x "$HOME/.board/bin/board" ] && "$HOME/.board/bin/board" watch-start
         echo "stack up: API:${POSTGRESTPORT} UI:${UI_PORT}  (attach: tmux attach -t $session)"
-        attach
+        [ -t 0 ] && attach       # no terminal at boot (@reboot crontab)
         ;;
+      boot)    # @reboot crontab: a full bringup only when no session exists (another boot hook may have made it)
+               tmux has-session -t "$session" 2>/dev/null && { echo "session $session exists; boot does nothing"; exit 0; }
+               exec "$0" up ;;
       apply)   apply ;;
       down)    destroy ;;
       status)  status ;;
       restart) destroy; sleep 2; exec "$0" up ;;
-      *) echo "usage: source tmux.sh   |   ./tmux.sh [up|apply|down|status|restart]"; ;;
+      *) echo "usage: source tmux.sh   |   ./tmux.sh [up|boot|apply|down|status|restart]"; ;;
     esac
 fi

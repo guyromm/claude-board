@@ -20,7 +20,7 @@ BEGIN
     RETURNING * INTO t;
     INSERT INTO board.task_note (task_id, author, body, change)
     VALUES (t.id, me, '', format('created%s', coalesce(', assigned to ' || who, '')));
-    RETURN format('task #%s created: %s', t.id, board.fmt_task(t));
+    RETURN format('task %s created: %s', board.task_ref(t.id), board.fmt_task(t));
 END $$;
 
 

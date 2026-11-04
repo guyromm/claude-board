@@ -12,7 +12,7 @@ BEGIN
     IF NOT FOUND THEN RETURN format('task #%s not found', task.id); END IF;
     WITH RECURSIVE up AS (SELECT x.id, x.parent_id, x.title, 0 AS d FROM board.task x WHERE x.id = t.parent_id
                           UNION ALL SELECT p.id, p.parent_id, p.title, up.d + 1 FROM board.task p JOIN up ON p.id = up.parent_id)
-    SELECT string_agg(format('#%s %s', up.id, up.title), ' > ' ORDER BY up.d DESC) INTO path FROM up;
+    SELECT string_agg(format('%s %s', board.task_ref(up.id), up.title), ' > ' ORDER BY up.d DESC) INTO path FROM up;
     SELECT string_agg(board.fmt_task(c, 1), E'\n' ORDER BY c.status = 'done', c.position, c.id) INTO subs
     FROM board.task c WHERE c.parent_id = t.id AND c.status <> 'cancelled';
     SELECT string_agg(format('  #%s "%s"  %s%s', x.thread_id, x.subject, upper(coalesce(x.status, 'unsummarized')),

@@ -46,9 +46,9 @@ UNION ALL
     ('task:'::text || t.id) AS tag,
     NULL::text AS audience,
     t.updated_at AS at,
-    format('Task #%s needs you: %s'::text, t.id, t.title) AS title,
+    format('Task %s needs you: %s'::text, board.task_ref(t.id), t.title) AS title,
     COALESCE("left"(t.human_reason, 240), ''::text) AS body,
-    ('/tasks/'::text || t.id) AS url
+    ('/tasks/'::text || t.path) AS url
    FROM board.task t
   WHERE (t.needs_human AND (t.status <> ALL (ARRAY['done'::text, 'cancelled'::text])))
 UNION ALL

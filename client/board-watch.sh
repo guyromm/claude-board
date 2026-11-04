@@ -15,7 +15,7 @@
 # and, when the board has a newer one, installs the new board + board-watch.sh and exits, so its restart
 # loop (board watch-start, or the project's tmux.sh worker) starts the new version. Bump WATCH_VERSION
 # here to push a change to every agent.
-WATCH_VERSION=12
+WATCH_VERSION=15
 BOARD_HOME="${BOARD_HOME:-$HOME/.board}"
 source "$BOARD_HOME/config" || { echo "no $BOARD_HOME/config"; exit 1; }
 BOARD_API="${BOARD_API:-@BOARD_API@}"
@@ -67,6 +67,18 @@ claude_under() {
               for (p in par) if (cmd[p] == "claude")
                   for (q = p; q != "" && q > 1; q = par[q]) if (q == root) exit 0
               exit 1 }'
+}
+# BOARD_TMUX_TARGET usually names a window ("proj:claude"), which tmux resolves to that window's ACTIVE pane:
+# once a human splits the window and works in the new pane, that is their shell (ofana, 11-04: notifications
+# nearly went into a `git add -p` prompt). So every poll T becomes the window's pane that runs Claude (the
+# active pane if none does). A pane id (%23) or an explicit pane (proj:claude.1) is used as given.
+resolve_target() {
+    if [[ "$BOARD_TMUX_TARGET" == %* || "$BOARD_TMUX_TARGET" =~ \.[0-9]+$ ]]; then T="$BOARD_TMUX_TARGET"; return; fi
+    local id pid
+    T="$BOARD_TMUX_TARGET"
+    while read -r id pid; do
+        if claude_under "$pid"; then T="$id"; return; fi
+    done < <(tmux list-panes -t "$BOARD_TMUX_TARGET" -F '#{pane_id} #{pane_pid}' 2>/dev/null)
 }
 SESSION=ok; SESSION_DETAIL=; BLOCKED_SINCE=0
 check_session() {
@@ -300,10 +312,40 @@ check_upgrade() {
     exit 0
 }
 
+# ---------------------------------------------------------------- model + Claude Code version
+# Read off the session's transcript: Claude Code writes ~/.claude/projects/<cwd, non-alphanumerics as "-">/<session>.jsonl,
+# where each line carries "version":"<Claude Code version>" and each assistant reply "model":"<model id>".
+# The newest transcript of the Claude process's working directory = the running session. Every INFO_EVERY seconds.
+INFO_EVERY="${BOARD_INFO_EVERY:-300}"
+CLAUDE_MODEL=; CLAUDE_VERSION=; L_INFO=0
+claude_pid() {  # the first Claude process under process $1
+    [ -n "$1" ] || return 1
+    ps -e -o pid=,ppid=,comm= 2>/dev/null | awk -v root="$1" '
+        { par[$1] = $2; cmd[$1] = $3 }
+        END { for (p in par) if (cmd[p] == "claude")
+                  for (q = p; q != "" && q > 1; q = par[q]) if (q == root) { print p; exit 0 }
+              exit 1 }'
+}
+check_info() {
+    local t pid cwd dir f tail_
+    t=$(now); [ $((t - L_INFO)) -ge "$INFO_EVERY" ] || return 0
+    L_INFO=$t
+    pid=$(claude_pid "$(tmux display-message -p -t "$T" '#{pane_pid}' 2>/dev/null)") || return 0
+    cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null)
+    [ -n "$cwd" ] || cwd=$(lsof -a -d cwd -p "$pid" -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)
+    [ -n "$cwd" ] || return 0
+    dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$(printf '%s' "$cwd" | sed 's/[^A-Za-z0-9]/-/g')"
+    f=$(ls -t "$dir"/*.jsonl 2>/dev/null | head -n 1); [ -n "$f" ] || return 0
+    tail_=$(tail -c 1000000 "$f" 2>/dev/null | grep -v '"isSidechain":true')     # not subagents' replies
+    CLAUDE_MODEL=$(grep -o '"model":"claude-[^"]*"' <<<"$tail_" | tail -n 1 | cut -d'"' -f4)
+    CLAUDE_VERSION=$(grep -o '"version":"[0-9][^"]*"' <<<"$tail_" | tail -n 1 | cut -d'"' -f4)
+}
+
 # ---------------------------------------------------------------- main loop
 log "watching as ${BOARD_HANDLE:-?} -> $T (every ${POLL}s, $BOARD_API, watcher v$WATCH_VERSION)"
 fails=0
 while true; do
+    resolve_target
     rpc poll; out=$RPC_OUT
     if [ "$RPC_CODE" = 200 ]; then
         fails=0
@@ -319,10 +361,11 @@ while true; do
         fi
     fi
 
-    [ -z "$L_ID" ] && check_session
+    [ -z "$L_ID" ] && { check_session; check_info; }
     task=
     rpc watch_sync --data-urlencode "session_state=$SESSION" --data-urlencode "session_detail=$SESSION_DETAIL" \
-        --data-urlencode "version=$WATCH_VERSION" && task=$RPC_OUT
+        --data-urlencode "version=$WATCH_VERSION" --data-urlencode "model=$CLAUDE_MODEL" \
+        --data-urlencode "claude_version=$CLAUDE_VERSION" && task=$RPC_OUT
     if [[ "$task" == login$'\t'* ]]; then
         IFS=$'\t' read -r _ lid lstate lcode <<<"$task"
         login_step "$lid" "$lstate" "$lcode"

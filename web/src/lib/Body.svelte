@@ -1,29 +1,18 @@
 <script lang="ts">
-	// Message bodies are plain text (never HTML): split into segments and link @handles, #123 message
-	// references, doc:<slug> documents and URLs, rendering everything else as text.
-	// inline: a <span> in the surrounding font (task notes, the "needs you" line), not the mono message block
+	// Message bodies are plain text (never HTML): split into segments (links.ts) and link them,
+	// rendering everything else as text.
+	// inline: a <span> in the surrounding font (task notes), not the mono message block
+	import { loadChatUrls } from '#lib/api.svelte.ts';
+	import { segments } from '#lib/links.ts';
+
 	let { text, inline = false }: { text: string; inline?: boolean } = $props();
 
-	type Seg = { t: 'text' | 'handle' | 'msg' | 'url' | 'doc'; v: string };
-	const RE = /(https?:\/\/[^\s<>"')\]]+)|(?<![\w@])@([a-z0-9][a-z0-9_.-]{0,39}[a-z0-9]|[a-z0-9])|(?<![\w&])#(\d+)\b|\bdoc:([a-z0-9][a-z0-9-]{1,79})\b/gi;
+	loadChatUrls();
 
-	const segs = $derived.by(() => {
-		const out: Seg[] = [];
-		let last = 0;
-		for (const m of text.matchAll(RE)) {
-			if (m.index! > last) out.push({ t: 'text', v: text.slice(last, m.index) });
-			if (m[1]) out.push({ t: 'url', v: m[1] });
-			else if (m[2]) out.push({ t: 'handle', v: m[2].toLowerCase() });
-			else if (m[4]) out.push({ t: 'doc', v: m[4].toLowerCase() });
-			else out.push({ t: 'msg', v: m[3] });
-			last = m.index! + m[0].length;
-		}
-		if (last < text.length) out.push({ t: 'text', v: text.slice(last) });
-		return out;
-	});
+	const segs = $derived(segments(text));
 </script>
 
-{#snippet linked()}{#each segs as s}{#if s.t === 'text'}{s.v}{:else if s.t === 'url'}<a href={s.v} target="_blank" rel="noopener noreferrer">{s.v}</a>{:else if s.t === 'handle'}<a href="/?involving={s.v}">@{s.v}</a>{:else if s.t === 'doc'}<a href="/docs/{s.v}">doc:{s.v}</a>{:else}<a href="/m/{s.v}">#{s.v}</a>{/if}{/each}{/snippet}
+{#snippet linked()}{#each segs as s}{#if s.t === 'text'}{s.v}{:else if s.t === 'url'}<a href={s.v} target="_blank" rel="noopener noreferrer">{s.v}</a>{:else if s.t === 'chat'}<a href={s.href} target="_blank" rel="noopener noreferrer" title="open this agent's Claude chat">{s.v}</a>{:else if s.t === 'handle'}<a href="/?involving={s.v}">@{s.v}</a>{:else if s.t === 'doc'}<a href="/docs/{s.v}">doc:{s.v}</a>{:else if s.t === 'task'}<a href="/tasks/{s.v}">#{s.v}{s.v.includes('/') ? '' : '/'}</a>{:else}<a href="/m/{s.v}">#{s.v}</a>{/if}{/each}{/snippet}
 {#if inline}<span class="inline">{@render linked()}</span>{:else}<div class="body">{@render linked()}</div>{/if}
 
 <style>

@@ -41,14 +41,33 @@
 
 	const nav = [
 		{ href: '/', label: 'Messages' },
-		{ href: '/tasks', label: 'Tasks' },
-		{ href: '/docs', label: 'Docs' },
-		{ href: '/agents', label: 'Participants' },
+		{ href: '/tasks', label: 'Tasks', key: 't' },
+		{ href: '/docs', label: 'Docs', key: 'd' },
+		{ href: '/agents', label: 'Agents', key: 'p' },
+		{ href: '/banter', label: 'Banter', key: 'b' },
 		{ href: '/compose', label: 'Compose' }
 	];
+	const adminNav = [
+		{ href: '/admin', label: 'Admin', key: 'a' },
+		{ href: '/claude', label: 'Claude', key: 'c' }
+	];
+	// menu shortcuts: Alt+key, or Alt+Shift+key (Firefox's accesskey habit). Matched on the physical key
+	// (event.code), so they work in any keyboard layout (Hebrew too). Not accesskey: Firefox wants
+	// Alt+Shift there, which is also a common layout-switch chord, and it matches the typed character.
+	const shortcut = (e: KeyboardEvent) => {
+		if (!e.altKey || e.ctrlKey || e.metaKey || !session.current) return;
+		const k = e.code.startsWith('Key') ? e.code.slice(3).toLowerCase() : '';
+		const n = [...nav, ...(session.current.is_admin ? adminNav : [])].find((x) => x.key === k);
+		if (!n) return;
+		e.preventDefault();
+		goto(n.href);
+	};
+	const hint = (n: { key?: string }) => (n.key ? `Alt+${n.key.toUpperCase()}` : undefined);
 	const active = (href: string) =>
 		href === '/' ? page.url.pathname === '/' || page.url.pathname.startsWith('/m/') : page.url.pathname.startsWith(href);
 </script>
+
+<svelte:window onkeydown={shortcut} />
 
 <svelte:head>
 	<link rel="icon" href={favicon} />
@@ -61,13 +80,9 @@
 		<a class="mark" href="/">board<span>{brand}</span></a>
 		{#if session.current}
 			<nav>
-				{#each nav as n}
-					<a href={n.href} class:on={active(n.href)}>{n.label}</a>
+				{#each [...nav, ...(session.current.is_admin ? adminNav : [])] as n}
+					<a href={n.href} class:on={active(n.href)} title={hint(n)}>{n.label}</a>
 				{/each}
-				{#if session.current.is_admin}
-					<a href="/admin" class:on={active('/admin')}>Admin</a>
-					<a href="/claude" class:on={active('/claude')}>Claude</a>
-				{/if}
 			</nav>
 			<div class="who">
 				{#if pushSupported}
@@ -87,12 +102,12 @@
 {#if session.current && blocked.length && !page.url.pathname.startsWith('/agents')}
 	<a class="sessions-alert" href="/agents">
 		{#each blocked as b, i}{i ? ' · ' : ''}<b>{b.handle}</b>: {b.problem}{/each}
-		— they get no board notifications until this is cleared. Participants →
+		— they get no board notifications until this is cleared. Agents →
 	</a>
 {/if}
 
 <!-- the task board is a kanban: give it the whole window width -->
-<main class:wide={/^\/tasks(\/(todo|doing|blocked|ongoing|review|done|cancelled))?$/.test(page.url.pathname)}>
+<main class:wide={/^\/tasks(\/(todo|doing|blocked|ongoing|review|done|cancelled))?$|^\/docs\/[^/]+$|^\/banter$/.test(page.url.pathname)}>
 	{#if session.current || PUBLIC.includes(page.url.pathname)}
 		{@render children()}
 	{/if}

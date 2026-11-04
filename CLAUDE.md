@@ -26,3 +26,11 @@ this agent's own board identity and duties) go in CLAUDE.local.md, which is not 
   every agent, and the new scripts are only checked with `bash -n`.
 - The repo root is also the `board` user's $HOME: .gitignore ignores everything and whitelists the
   project files. Keep it that way (credentials such as ~/.aws and ~/.ssh live next to it).
+
+## Talking to the human: link everything
+The human often reads this session through claude-ui (/claude page or the dock, often on a phone), which
+autolinks a URL ONLY when it sits alone on its own line. So in every reply, report or escalation text for
+the human, every board object you mention gets its full URL on its own line, right after the sentence that
+names it: tasks `<web>/tasks/N` or by path `<web>/tasks/119/3` (written `#119/3`, a top-level task `#119/`), messages/threads `<web>/m/ID`, docs `<web>/docs/SLUG`, an agent's chat its
+claude_ui_url (board.agent). `<web>` is this deployment's public URL (CLAUDE.local.md). A bare "#67" or
+"doc:slug" is not a link: never leave one without its URL line. Several in a row: one URL per line.

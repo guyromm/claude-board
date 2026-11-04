@@ -9,4 +9,5 @@
 	pgrst={API}
 	getToken={() => session.current?.token ?? null}
 	isAdmin={() => !!session.current?.is_admin}
+	loginUrl="/login?next="
 />

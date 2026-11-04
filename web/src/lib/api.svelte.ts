@@ -63,6 +63,16 @@ export async function api<T = any>(
 	return { data, total: Number.isFinite(total) ? total : null };
 }
 
+// handle -> claude-ui chat URL (board.agent.claude_ui_url), loaded once: Body links "<handle>'s session"
+// and "<handle>'s chat" in escalations and summaries to the agent's chat
+export const chatUrls = $state<{ map: Map<string, string> }>({ map: new Map() });
+let chatLoad: Promise<void> | null = null;
+export function loadChatUrls() {
+	chatLoad ??= api<{ handle: string; claude_ui_url: string }[]>('/agents?select=handle,claude_ui_url&claude_ui_url=not.is.null')
+		.then((r) => { chatUrls.map = new Map(r.data.map((a) => [a.handle, a.claude_ui_url])); })
+		.catch(() => { chatLoad = null; });
+}
+
 export type Message = {
 	id: number;
 	sender: string;
@@ -117,6 +127,15 @@ export type Agent = {
 	session_changed_at: string | null;
 	watcher_version: number | null;
 	claude_ui_url: string | null; // the agent's claude-ui (web/phone UI onto its Claude session)
+	claude_model: string | null; // the session's model id, e.g. claude-opus-5-5 (watcher v13+)
+	claude_version: string | null; // its Claude Code version, e.g. 2.1.312
+	claude_info_at: string | null;
+};
+
+// "claude-opus-5-5" / "claude-sonnet-4-5-20250929" -> "Opus 5.5" / "Sonnet 4.5"; anything else as is
+export const modelName = (id: string) => {
+	const m = /^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?$/.exec(id);
+	return m ? `${m[1][0].toUpperCase()}${m[1].slice(1)} ${m[2]}${m[3] ? '.' + m[3] : ''}` : id;
 };
 
 export const MESSAGE_COLS =
@@ -182,8 +201,18 @@ export type Task = {
 	threads: number[];
 	notes: number;
 	last_note: string | null;
+	path: string; // semantic id: "119" top level, "119/3" its 3rd subtask (board.task.path)
 };
+// how a task is written and linked: "#119/" (top level; bare "#119" is a message) or "#119/3"
+export const taskRef = (t: { path: string; parent_id: number | null }) => `#${t.path}${t.parent_id ? '' : '/'}`;
+export const taskHref = (t: { path: string }) => `/tasks/${t.path}`;
 export type TaskNote = { id: number; task_id: number; author: string; body: string; change: string | null; created_at: string };
+// one escalation ("needs you") and how it ended (api.task_escalations)
+export type TaskEscalation = {
+	id: number; task_id: number; task_title: string; task_status: TaskStatus; raised_by: string; raised_at: string;
+	reason: string; ended_at: string | null; ended_by: string | null; outcome: 'open' | 'answered' | 'cleared' | 'reworded';
+	answer: string | null;
+};
 export type TaskThread = {
 	task_id: number; thread_id: number; linked_by: string; linked_at: string; subject: string;
 	last_at: string; size: number; status: 'open' | 'closed' | null; needs_human: boolean; summary: string | null;

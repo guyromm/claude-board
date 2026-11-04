@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { ago, type ThreadSummary } from '#lib/api.svelte.ts';
+	import Md from '#lib/Md.svelte';
 
 	// thread status banner: summarizer's verdict (open/closed, needs human) + the summary text
 	let { s }: { s: ThreadSummary | undefined } = $props();
@@ -14,8 +15,8 @@
 			<span class="spacer"></span>
 			<span class="by" title={s.summarized_at ?? ''}>summary by {s.summarized_by} · through #{s.summarized_through} · {ago(s.summarized_at)}</span>
 		</div>
-		{#if s.needs_human && s.human_reason}<div class="reason"><b>Your call:</b> {s.human_reason}</div>{/if}
-		<div class="text">{s.summary}</div>
+		{#if s.needs_human && s.human_reason}<div class="reason"><b>Your call:</b> <Md text={s.human_reason} /></div>{/if}
+		<div class="text"><Md text={s.summary ?? ''} /></div>
 	</div>
 {:else if s}
 	<div class="summary pending"><span class="by">not summarized yet</span></div>
@@ -46,5 +47,5 @@
 	.spacer { flex: 1; }
 	.by { color: var(--muted); font-size: 0.75rem; }
 	.reason { color: #d9480f; font-weight: 500; }
-	.text { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.4; }
+	.text { overflow-wrap: anywhere; }
 </style>

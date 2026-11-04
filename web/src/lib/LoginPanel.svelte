@@ -87,9 +87,9 @@
 				<details><summary class="small">What the session showed</summary><pre>{req.pane_tail}</pre></details>
 			{/if}
 		{/if}
-		{#if agent.session_state !== 'logged_out'}
-			<!-- only offered when it is the fix: /login is typed into the pane, so on a session with a dialog open
-			     it would answer the dialog -->
+		{#if agent.session_state === 'needs_input' || agent.session_state === 'no_claude'}
+			<!-- /login is typed into the pane: with a dialog open it would answer the dialog, in a bare shell run it
+			     (api.request_login refuses both too) -->
 		{:else if outdated}
 			<div class="muted small">Remote login needs watcher v2+ (this one is {agent.watcher_version ? `v${agent.watcher_version}` : 'older'}).
 				On the agent's host: <code>curl -fsSL {location.origin}/install.sh | bash && board watch-start</code></div>

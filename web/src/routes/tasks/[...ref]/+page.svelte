@@ -1,30 +1,40 @@
 <script lang="ts">
 	import { page } from '$app/state';
-	import { api, ago, fmtTime, TASK_STATUSES, TASK_LABEL, type Task, type TaskNote, type TaskThread, type Agent } from '#lib/api.svelte.ts';
+	import { api, ago, fmtTime, taskRef, taskHref, TASK_STATUSES, TASK_LABEL, type Task, type TaskNote, type TaskThread, type TaskEscalation, type Agent } from '#lib/api.svelte.ts';
 	import { every, REFRESH_MS } from '#lib/poll.ts';
 	import Body from '#lib/Body.svelte';
+	import Md from '#lib/Md.svelte';
 
-	const id = $derived(Number(page.params.id));
+	// /tasks/151 (the id) or /tasks/119/3 (the semantic path; old paths of moved tasks resolve too)
+	const ref = $derived(page.params.ref ?? '');
+	let id = $state(0);
+	$effect(() => {
+		const r = ref.replace(/\/+$/, '');
+		if (/^\d+$/.test(r)) { id = Number(r); return; }
+		api<string>('/rpc/task_id', { body: { ref: r } }).then((x) => (id = Number(x.data))).catch((e) => (error = (e as Error).message));
+	});
 	let task = $state<Task | null>(null);
 	let path = $state<Task[]>([]);
 	let subs = $state<Task[]>([]);
 	let notes = $state<TaskNote[]>([]);
 	let threads = $state<TaskThread[]>([]);
+	let escs = $state<TaskEscalation[]>([]);
 	let agents = $state<Agent[]>([]);
 	let error = $state('');
 	let busy = $state(false);
 
 	async function load() {
 		try {
-			const [t, s, n, th] = await Promise.all([
+			const [t, s, n, th, es] = await Promise.all([
 				api<Task[]>(`/tasks?id=eq.${id}`),
 				api<Task[]>(`/tasks?parent_id=eq.${id}&order=position,id`),
 				api<TaskNote[]>(`/task_notes?task_id=eq.${id}&order=id.desc`),
-				api<TaskThread[]>(`/task_threads?task_id=eq.${id}&order=last_at.desc`)
+				api<TaskThread[]>(`/task_threads?task_id=eq.${id}&order=last_at.desc`),
+				api<TaskEscalation[]>(`/task_escalations?task_id=eq.${id}&order=id.desc`)
 			]);
 			task = t.data[0] ?? null;
 			if (!task) { error = `task #${id} not found`; return; }
-			subs = s.data; notes = n.data; threads = th.data; error = '';
+			subs = s.data; notes = n.data; threads = th.data; escs = es.data; error = '';
 			const up: Task[] = [];
 			for (let p = task.parent_id; p; ) {
 				const r = await api<Task[]>(`/tasks?id=eq.${p}`);
@@ -34,7 +44,7 @@
 			path = up;
 		} catch (e) { error = (e as Error).message; }
 	}
-	$effect(() => { void id; load(); return every(REFRESH_MS, load); });
+	$effect(() => { if (!id) return; void id; load(); return every(REFRESH_MS, load); });
 	$effect(() => { api<Agent[]>('/agents?select=handle,kind&active=is.true&order=kind.desc,handle').then((r) => (agents = r.data)); });
 
 	async function rpc(fn: string, body: object) {
@@ -51,19 +61,48 @@
 	let sub = $state({ title: '', assignee: '' });
 	let editing = $state(false);
 	let desc = $state('');
+
+	// the escalation that last ended (answered or cleared; a re-worded one was replaced, not ended)
+	const lastEnded = $derived(escs.find((e) => e.outcome === 'answered' || e.outcome === 'cleared'));
+	const OUTCOME: Record<TaskEscalation['outcome'], string> = { open: 'needs you now', answered: 'answered', cleared: 'cleared', reworded: 'reworded' };
+
+	// the timeline: log entries plus subtasks created and conversations filed under this task, newest first
+	type Ev = { at: string; key: string; author: string; kind: 'note' | 'sub' | 'link'; esc?: boolean;
+		note?: TaskNote; sub?: Task; th?: TaskThread };
+	let logFilter = $state<'all' | 'notes' | 'escalations' | 'changes'>('all');
+	const timeline = $derived.by(() => {
+		const ev: Ev[] = notes.map((n) => ({ at: n.created_at, key: `n${n.id}`, author: n.author, kind: 'note' as const, note: n,
+			esc: /escalat/.test(n.change ?? '') }));
+		for (const s of subs) ev.push({ at: s.created_at, key: `s${s.id}`, author: s.created_by, kind: 'sub', sub: s });
+		for (const th of threads) ev.push({ at: th.linked_at, key: `t${th.thread_id}`, author: th.linked_by, kind: 'link', th });
+		ev.sort((a, b) => b.at.localeCompare(a.at));
+		return ev.filter((e) => logFilter === 'all' || (logFilter === 'escalations' ? e.esc
+			: logFilter === 'notes' ? e.kind === 'note' && !!e.note?.body : e.kind !== 'note' || !!e.note?.change));
+	});
 </script>
 
 {#if task}
 	<div class="crumbs muted">
 		<a href="/tasks">Tasks</a>
-		{#each path as p} › <a href="/tasks/{p.id}">#{p.id} {p.title}</a>{/each}
+		{#each path as p} › <a href={taskHref(p)}>{taskRef(p)} {p.title}</a>{/each}
 		· <a href="/tasks?root={path[0]?.id ?? task.id}">board view</a>
 	</div>
-	<h1><span class="muted">#{task.id}</span> {task.title}</h1>
+	<h1><span class="muted" title="id {task.id}">{taskRef(task)}</span> {task.title}</h1>
 
 	{#if task.needs_human}
-		<div class="attn"><b>Needs you:</b> <Body text={task.human_reason ?? ''} inline />
-			<button class="link" disabled={busy} onclick={() => update({ needs_human: false })}>Clear</button></div>
+		<div class="attn"><b>Needs you</b>
+			<button class="link" disabled={busy} onclick={() => update({ needs_human: false })}>Clear</button>
+			<div class="need"><Md text={task.human_reason ?? ''} /></div></div>
+	{:else if lastEnded}
+		<!-- the last "needs you", kept in view after an answer cleared it -->
+		<details class="was">
+			<summary><b>Last needs-you</b> <span class="muted">· {OUTCOME[lastEnded.outcome]} by {lastEnded.ended_by}
+				<span title={fmtTime(lastEnded.ended_at ?? '')}>{ago(lastEnded.ended_at ?? '')}</span></span>
+				{#if lastEnded.answer}<span class="ans"><b>{lastEnded.ended_by}:</b> <Body text={lastEnded.answer} inline /></span>{/if}</summary>
+			<div class="why"><Md text={lastEnded.reason} /></div>
+			<div class="muted small">raised by {lastEnded.raised_by} <span title={fmtTime(lastEnded.raised_at)}>{ago(lastEnded.raised_at)}</span>
+				· <a href="#escalations">all escalations ({escs.length})</a></div>
+		</details>
 	{/if}
 
 	<div class="fields panel">
@@ -91,7 +130,7 @@
 
 	<!-- actions sit above the description: the sections below can be long -->
 	<section class="actions panel">
-		<nav class="small"><a href="#subtasks">Subtasks ({task.subtasks})</a> · <a href="#conversations">Conversations ({threads.length})</a> · <a href="#log">Log ({notes.length})</a></nav>
+		<nav class="small"><a href="#subtasks">Subtasks ({task.subtasks})</a> · <a href="#conversations">Conversations ({threads.length})</a> · <a href="#log">Log ({notes.length})</a>{#if escs.length} · <a href="#escalations">Escalations ({escs.length})</a>{/if}</nav>
 		<form class="note" onsubmit={async (e) => { e.preventDefault(); if (await update({ note })) note = ''; }}>
 			<textarea bind:value={note} rows="2" placeholder="Add a note (progress, decision, instruction)…"></textarea>
 			<button disabled={busy || !note.trim()}>Add note</button>
@@ -131,9 +170,9 @@
 	<section id="subtasks">
 		<h2>Subtasks <span class="muted">{task.subtasks_done}/{task.subtasks}</span></h2>
 		{#each subs as s}
-			<a class="sub" href="/tasks/{s.id}" class:done={s.status === 'done'} class:cancelled={s.status === 'cancelled'}>
+			<a class="sub" href={taskHref(s)} class:done={s.status === 'done'} class:cancelled={s.status === 'cancelled'}>
 				<span class="st {s.status}">{TASK_LABEL[s.status]}</span>
-				<span><span class="muted">#{s.id}</span> {s.title}</span>
+				<span><span class="muted">{taskRef(s)}</span> {s.title}</span>
 				<span class="chip">{s.assignee ?? 'unassigned'}</span>
 				{#if s.needs_human}<span class="late">needs you</span>{/if}
 				<span class="muted small">{ago(s.activity_at)}</span>
@@ -149,21 +188,44 @@
 				<span class="muted small">{th.size} msgs · {ago(th.last_at)}{th.status ? ` · ${th.status}` : ''}</span>
 				{#if th.needs_human}<span class="late small">needs you</span>{/if}
 				<button class="link small" disabled={busy} onclick={() => rpc('task_link', { id, thread: th.thread_id, unlink: true })}>unlink</button>
-				{#if th.summary}<div class="muted small">{th.summary}</div>{/if}
+				{#if th.summary}<div class="muted small"><Body text={th.summary} inline /></div>{/if}
 			</div>
 		{:else}<p class="muted">None yet. Agents file them with <code>board post --task {id}</code> or <code>board task link {id} THREAD</code>.</p>{/each}
 	</section>
 
 	<section id="log">
-		<h2>Log</h2>
-		{#each notes as n}
-			<div class="entry">
-				<div class="muted small"><b>{n.author}</b> · <span title={fmtTime(n.created_at)}>{ago(n.created_at)}</span>
-					{#if n.change}<span class="change"><Body text={n.change} inline /></span>{/if}</div>
-				{#if n.body}<div class="body"><Body text={n.body} inline /></div>{/if}
+		<h2>Log
+			<span class="filters small">
+				{#each [['all', 'All'], ['notes', 'Notes'], ['changes', 'Changes'], ['escalations', 'Escalations']] as [k, label]}
+					<button class="link" class:on={logFilter === k} onclick={() => (logFilter = k as typeof logFilter)}>{label}</button>
+				{/each}
+			</span>
+		</h2>
+		{#each timeline as e (e.key)}
+			<div class="entry" class:esc={e.esc}>
+				<div class="muted small"><b>{e.author}</b> · <span title={fmtTime(e.at)}>{ago(e.at)}</span>
+					{#if e.note?.change}<span class="change"><Body text={e.note.change} inline /></span>
+					{:else if e.sub}<span class="change">created subtask <a href="/tasks/{e.sub.id}">#{e.sub.id} {e.sub.title}</a>{e.sub.assignee ? ` @${e.sub.assignee}` : ''}</span>
+					{:else if e.th}<span class="change">filed conversation <a href="/m/{e.th.thread_id}">#{e.th.thread_id} {e.th.subject}</a></span>{/if}</div>
+				{#if e.note?.body}<div class="body"><Body text={e.note.body} inline /></div>{/if}
 			</div>
-		{/each}
+		{:else}<p class="muted">Nothing in this view.</p>{/each}
 	</section>
+
+	{#if escs.length}
+		<section id="escalations">
+			<h2>Escalations <span class="muted">{escs.length}</span></h2>
+			{#each escs as e (e.id)}
+				<details class="escrow {e.outcome}" open={e.outcome === 'open' || e.id === lastEnded?.id}>
+					<summary class="small"><span class="oc">{OUTCOME[e.outcome]}</span>
+						raised by <b>{e.raised_by}</b> <span title={fmtTime(e.raised_at)}>{ago(e.raised_at)}</span>
+						{#if e.ended_at}<span class="muted">· {e.outcome} by {e.ended_by} {ago(e.ended_at)}</span>{/if}</summary>
+					<div class="why"><Md text={e.reason} /></div>
+					{#if e.answer}<div class="ans"><b>{e.ended_by}:</b> <Body text={e.answer} inline /></div>{/if}
+				</details>
+			{/each}
+		</section>
+	{/if}
 {:else if error}
 	<p class="error">{error}</p>
 {:else}
@@ -200,5 +262,19 @@
 	.note { display: grid; gap: 0.4rem; justify-items: start; }
 	.entry { padding: 0.5rem 0; border-bottom: 1px solid var(--line); }
 	.change { margin-left: 0.4rem; font-family: var(--mono); font-size: 0.75rem; }
+	.entry.esc { border-left: 3px solid #d9480f; padding-left: 0.5rem; }
+	.filters { margin-left: auto; display: flex; gap: 0.6rem; font-weight: 400; }
+	.filters .on { font-weight: 700; text-decoration: underline; }
+	.was { background: color-mix(in srgb, var(--line) 30%, var(--panel)); border-left: 4px solid var(--muted); padding: 0.5rem 0.75rem;
+		border-radius: 6px; margin-bottom: 1rem; font-size: 0.9rem; }
+	.was summary { cursor: pointer; }
+	.why { margin: 0.4rem 0; }
+	.need { flex-basis: 100%; }
+	.ans { display: block; margin-top: 0.3rem; white-space: pre-wrap; }
+	.escrow { padding: 0.4rem 0; border-bottom: 1px solid var(--line); }
+	.escrow summary { cursor: pointer; }
+	.escrow .oc { display: inline-block; min-width: 6.5rem; font-weight: 700; text-transform: uppercase; font-size: 0.7rem; letter-spacing: 0.05em; color: var(--muted); }
+	.escrow.open .oc { color: #d9480f; }
+	.escrow.answered .oc { color: #2e9d5b; }
 	code { font-size: 0.8rem; }
 </style>

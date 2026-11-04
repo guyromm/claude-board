@@ -11,6 +11,7 @@ DECLARE
     who text := nullif(lower(btrim(task_update.assignee, ' @')), '');
     changes text[] := '{}';
     edits boolean;
+    answered boolean := false;
 BEGIN
     SELECT * INTO o FROM board.task x WHERE x.id = task_update.id FOR UPDATE;
     IF NOT FOUND THEN RAISE EXCEPTION 'task #% not found', task_update.id; END IF;
@@ -53,6 +54,9 @@ BEGIN
         IF task_update.needs_human AND nullif(btrim(task_update.human_reason), '') IS NULL THEN
             RAISE EXCEPTION 'needs_human requires human_reason' USING HINT = 'say what the human has to decide or do';
         END IF;
+        IF task_update.needs_human AND length(btrim(task_update.human_reason)) > 1500 THEN
+            RAISE EXCEPTION 'human_reason too long (% chars, max 1500)', length(btrim(task_update.human_reason)) USING HINT = 'Markdown, short: goal line, options as a list, **Recommendation**, deadline, where the human acts; background goes in a note or doc:SLUG';
+        END IF;
         n.needs_human := task_update.needs_human;
         n.human_reason := CASE WHEN task_update.needs_human THEN btrim(task_update.human_reason) END;
     END IF;
@@ -61,6 +65,14 @@ BEGIN
     IF n.status IN ('done', 'cancelled') AND n.status IS DISTINCT FROM o.status AND n.needs_human
        AND task_update.needs_human IS NULL THEN
         n.needs_human := false; n.human_reason := NULL;
+    END IF;
+    -- a human's note or edit answers the escalation: the task leaves "Needs you" at once; the PM (told
+    -- below) or the assignee escalates again if the human is still needed
+    IF n.needs_human AND task_update.needs_human IS NULL AND (SELECT kind FROM board.agent WHERE handle = me) = 'human'
+       AND (nullif(btrim(task_update.note), '') IS NOT NULL
+            OR coalesce(task_update.status, who, task_update.title, task_update.description, task_update.parent::text,
+                        task_update.check_every, task_update.due) IS NOT NULL) THEN
+        n.needs_human := false; n.human_reason := NULL; answered := true;
     END IF;
 
     IF n.status IS DISTINCT FROM o.status THEN changes := changes || format('status: %s -> %s', o.status, n.status); END IF;
@@ -73,14 +85,15 @@ BEGIN
     IF n.check_every IS DISTINCT FROM o.check_every THEN changes := changes || format('check-in every %s', n.check_every); END IF;
     IF n.due_at IS DISTINCT FROM o.due_at THEN changes := changes || format('due: %s', coalesce(board.fmt_ts(n.due_at), '-')); END IF;
     IF n.needs_human IS DISTINCT FROM o.needs_human OR n.human_reason IS DISTINCT FROM o.human_reason THEN
-        changes := changes || CASE WHEN n.needs_human THEN 'escalated to the human: ' || n.human_reason ELSE 'escalation cleared' END;
+        changes := changes || CASE WHEN n.needs_human THEN 'escalated to the human: ' || n.human_reason
+                                   WHEN answered THEN format('escalation answered by %s, cleared', me) ELSE 'escalation cleared' END;
     END IF;
     IF cardinality(changes) = 0 AND nullif(btrim(task_update.note), '') IS NULL THEN
         IF n.position IS DISTINCT FROM o.position THEN
             UPDATE board.task x SET position = n.position WHERE x.id = o.id;
-            RETURN format('task #%s moved', o.id);
+            RETURN format('task %s moved', board.task_ref(o.id));
         END IF;
-        RETURN format('task #%s: nothing changed', o.id);
+        RETURN format('task %s: nothing changed', board.task_ref(o.id));
     END IF;
 
     UPDATE board.task x SET status = n.status, assignee = n.assignee, title = n.title, description = n.description,
@@ -95,40 +108,40 @@ BEGIN
     -- new assignee's assignment notice already cover those)
     IF n.status IS DISTINCT FROM o.status THEN
         INSERT INTO board.task_notice (task_id, handle, line)
-        SELECT DISTINCT ON (r.handle) o.id, r.handle, format('[board] task #%s "%s" moved %s -> %s by %s%s%s -- see it with: board task %s',
-               o.id, n.title, o.status, n.status, me,
-               CASE WHEN r.why = 'parent' THEN format(' (subtask of #%s "%s")', p.id, p.title) ELSE '' END,
+        SELECT DISTINCT ON (r.handle) o.id, r.handle, format('[board] task %s "%s" moved %s -> %s by %s%s%s -- see it with: board task %s',
+               board.task_ref(o.id), n.title, o.status, n.status, me,
+               CASE WHEN r.why = 'parent' THEN format(' (subtask of %s "%s")', board.task_ref(p.id), p.title) ELSE '' END,
                CASE WHEN nullif(btrim(task_update.note), '') IS NOT NULL
                     THEN ': "' || left(regexp_replace(btrim(task_update.note), '\s+', ' ', 'g'), 150)
                          || CASE WHEN length(btrim(task_update.note)) > 150 THEN '…' ELSE '' END || '"' ELSE '' END,
-               o.id)
+               o.id) || CASE WHEN answered THEN ' -- this answers its escalation (cleared): act on it, and escalate again (--human) only if the human is still needed' ELSE '' END
         FROM (SELECT 1) one
         LEFT JOIN board.task p ON p.id = n.parent_id
         CROSS JOIN LATERAL (VALUES (n.assignee, 'task'), (n.created_by, 'task'),
                                    (CASE WHEN n.status IN ('done', 'cancelled') THEN p.assignee END, 'parent'),
                                    (CASE WHEN n.status IN ('done', 'cancelled') THEN p.created_by END, 'parent'),
-                                   (CASE WHEN n.status IN ('done', 'cancelled') THEN (SELECT pm FROM board.policy) END, 'task')) r(handle, why)
+                                   (CASE WHEN n.status IN ('done', 'cancelled') OR answered THEN (SELECT pm FROM board.policy) END, 'task')) r(handle, why)
         JOIN board.agent a ON a.handle = r.handle AND a.kind = 'agent'
         WHERE r.handle <> me
           AND NOT (r.handle = n.assignee AND n.assignee IS DISTINCT FROM o.assignee)
-          AND NOT (r.handle = (SELECT pm FROM board.policy) AND n.status IN ('blocked', 'review'))
+          AND NOT (r.handle = (SELECT pm FROM board.policy) AND n.status IN ('blocked', 'review') AND NOT answered)
         ORDER BY r.handle, r.why;  -- 'parent' first: one line per person, with the subtask context
     ELSIF (SELECT kind FROM board.agent WHERE handle = me) = 'human' THEN
         -- a human's note or edit (an approval, an answer, a correction) must reach the agents who own the
         -- task; agents' own notes stay silent (progress reports)
         INSERT INTO board.task_notice (task_id, handle, line)
-        SELECT DISTINCT o.id, r.handle, format('[board] task #%s "%s": %s %s%s -- see it with: board task %s',
-               o.id, n.title, me,
+        SELECT DISTINCT o.id, r.handle, format('[board] task %s "%s": %s %s%s -- see it with: board task %s',
+               board.task_ref(o.id), n.title, me,
                CASE WHEN nullif(btrim(task_update.note), '') IS NOT NULL
                     THEN 'noted "' || left(regexp_replace(btrim(task_update.note), '\s+', ' ', 'g'), 200)
                          || CASE WHEN length(btrim(task_update.note)) > 200 THEN '…' ELSE '' END || '"' ELSE 'edited it' END,
                CASE WHEN cardinality(changes) > 0 THEN ' (' || array_to_string(changes, '; ') || ')' ELSE '' END,
-               o.id)
-        FROM (VALUES (n.assignee), (n.created_by)) r(handle)
+               o.id) || CASE WHEN answered THEN ' -- this answers its escalation (cleared): act on it, and escalate again (--human) only if the human is still needed' ELSE '' END
+        FROM (VALUES (n.assignee), (n.created_by), (CASE WHEN answered THEN (SELECT pm FROM board.policy) END)) r(handle)
         JOIN board.agent a ON a.handle = r.handle AND a.kind = 'agent'
         WHERE NOT (r.handle = n.assignee AND n.assignee IS DISTINCT FROM o.assignee);
     END IF;
-    RETURN format('task #%s updated%s', o.id, CASE WHEN cardinality(changes) > 0 THEN ' (' || array_to_string(changes, '; ') || ')' ELSE ': note added' END);
+    RETURN format('task %s updated%s', board.task_ref(o.id), CASE WHEN cardinality(changes) > 0 THEN ' (' || array_to_string(changes, '; ') || ')' ELSE ': note added' END);
 END $$;
 
 

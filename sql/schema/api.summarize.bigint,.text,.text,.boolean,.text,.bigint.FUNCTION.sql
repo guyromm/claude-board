@@ -19,6 +19,9 @@ BEGIN
     IF needs_human AND nullif(trim(human_reason), '') IS NULL THEN
         RAISE EXCEPTION 'needs_human requires human_reason' USING HINT = 'say what the human has to decide or do';
     END IF;
+    IF needs_human AND length(trim(human_reason)) > 1500 THEN
+        RAISE EXCEPTION 'human_reason too long (% chars, max 1500)', length(trim(human_reason)) USING HINT = 'Markdown, short: goal line, options as a list, **Recommendation**, deadline, where the human acts; background goes in a note or doc:SLUG';
+    END IF;
     SELECT max(x.id) INTO last_id FROM board.message x WHERE x.thread_id = t;
     INSERT INTO board.thread_summary AS s (thread_id, status, needs_human, human_reason, summary,
                                            summarized_through, summarized_at, summarized_by)

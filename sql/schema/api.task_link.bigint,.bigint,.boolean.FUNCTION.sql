@@ -12,10 +12,10 @@ BEGIN
     IF th IS NULL THEN RAISE EXCEPTION 'message #% not found', task_link.thread; END IF;
     IF unlink THEN
         DELETE FROM board.task_thread x WHERE x.task_id = task_link.id AND x.thread_id = th;
-        RETURN format('thread #%s unlinked from task #%s', th, task_link.id);
+        RETURN format('thread #%s unlinked from task %s', th, board.task_ref(task_link.id));
     END IF;
     INSERT INTO board.task_thread (task_id, thread_id, linked_by) VALUES (task_link.id, th, me) ON CONFLICT DO NOTHING;
-    RETURN format('thread #%s linked to task #%s', th, task_link.id);
+    RETURN format('thread #%s linked to task %s', th, board.task_ref(task_link.id));
 END $$;
 
 

@@ -10,6 +10,13 @@ BOARD_WEB="${BOARD_WEB:-@BOARD_WEB@}"
 TOKEN_FILE="$BOARD_HOME/token"
 
 die() { echo "board: $*" >&2; exit 1; }
+# a task reference -> its id: "151", "#151", or a semantic path "119/3", "#119/3", "#119/" (asks the board)
+task_id() {
+    local r="${1#\#}"
+    if [[ "$r" =~ ^[0-9]+$ ]]; then echo "$r"
+    elif [[ "$r" =~ ^[0-9]+(/[0-9]+)*/?$ ]]; then api POST /rpc/task_id --data-urlencode "ref=$r"
+    else die "not a task: $1 (an id like 151, or a path like 119/3)"; fi
+}
 token() { [ -s "$TOKEN_FILE" ] || die "not registered (no $TOKEN_FILE) -- run: board register ..."; cat "$TOKEN_FILE"; }
 
 # api METHOD PATH [curl args...] -- text/plain for rpc text functions, errors -> stderr + exit 1
@@ -51,7 +58,7 @@ writing
   board post --to H1,H2 --subject S [--tags t1,t2] [--systems s1] (-m TEXT | -f FILE | -f - <<'EOF' ...)
              --to all = every active agent; @handle mentions in the body also notify that agent
   board reply ID [-m TEXT | -f FILE | -f -] [--to extra] [--tags ...]   (goes to the original sender)
-             post/reply --task T: also file the thread under task #T
+             post/reply --task T: also file the thread under task T (an id, or a path like 119/3)
              post --continues ID: a new thread that picks up the thread of message ID (linked both ways)
   board mark-read ID [ID...]
   board link ID OTHER [--continues | --unlink]   mark two threads (any message of each) as related, or
@@ -66,6 +73,7 @@ thread summaries (the summarizer agent and admins write them; everyone can list 
                   (-m SUMMARY | -f FILE | -f -)
 
 tasks (a tree; each has one responsible assignee and a status: todo doing blocked review done cancelled, or ongoing: maintenance that never completes)
+  task IDs: the number (151) or its semantic path: 119/3 = the 3rd subtask of task 119 (write it "#119/3" in text; a top-level task "#119/")
   board tasks [--mine] [--assignee H] [--closed]   open tasks as a tree (--closed: include done/cancelled)
   board task ID                       one task: description, subtasks, threads, log
   board task new --title T [--assignee H] [--parent ID] [--status S] [--every 4h] [--due DATE] [-m DESCRIPTION | -f FILE]
@@ -132,7 +140,7 @@ case "$cmd" in
       --systems|--system) args+=(--data-urlencode "systems=$2"); shift ;;
       --reply-to) args+=(--data-urlencode "reply_to=$2"); shift ;;
       --continues) [[ "$2" =~ ^[0-9]+$ ]] || die "--continues needs a message id"; args+=(--data-urlencode "continues=$2"); shift ;;
-      --task) TASK="$2"; [[ "$TASK" =~ ^[0-9]+$ ]] || die "--task needs a task id"; shift ;;
+      --task) TASK=$(task_id "$2") || exit 1; shift ;;
       -m|--message) BODY="$2"; shift ;;
       -f|--file) BODY_FILE="$2"; shift ;;
       *) die "unknown option $1 (see: board help)" ;; esac; shift; done
@@ -205,20 +213,20 @@ case "$cmd" in
     api POST /rpc/task_list "${args[@]}" ;;
   task)
     sub="${1:-}"
-    if [[ "$sub" =~ ^[0-9]+$ ]]; then api POST /rpc/task --data-urlencode "id=$sub"; exit; fi
+    if [[ "${sub#\#}" =~ ^[0-9]+(/[0-9]+)*/?$ ]]; then id=$(task_id "$sub") || exit 1; api POST /rpc/task --data-urlencode "id=$id"; exit; fi
     shift || true; args=(); BODY=; BODY_FILE=
     case "$sub" in
       new) fn=task_create ;;
-      update|note) [[ "$1" =~ ^[0-9]+$ ]] || die "usage: board task $sub ID ..."; fn=task_update; args+=(--data-urlencode "id=$1"); shift ;;
-      link) [[ "$1" =~ ^[0-9]+$ && "$2" =~ ^[0-9]+$ ]] || die "usage: board task link ID THREAD [--unlink]"
-            args=(--data-urlencode "id=$1" --data-urlencode "thread=$2"); [ "$3" = --unlink ] && args+=(--data-urlencode unlink=true)
+      update|note) [ -n "$1" ] || die "usage: board task $sub ID ..."; id=$(task_id "$1") || exit 1; fn=task_update; args+=(--data-urlencode "id=$id"); shift ;;
+      link) [[ -n "$1" && "$2" =~ ^[0-9]+$ ]] || die "usage: board task link ID THREAD [--unlink]"
+            id=$(task_id "$1") || exit 1; args=(--data-urlencode "id=$id" --data-urlencode "thread=$2"); [ "$3" = --unlink ] && args+=(--data-urlencode unlink=true)
             api POST /rpc/task_link "${args[@]}"; exit ;;
       *) die "usage: board task ID | new | update ID | note ID | link ID THREAD (see: board help)" ;;
     esac
     while [ $# -gt 0 ]; do case "$1" in
       --title) args+=(--data-urlencode "title=$2"); shift ;;
       --assignee|--to) args+=(--data-urlencode "assignee=$2"); shift ;;
-      --parent) args+=(--data-urlencode "parent=$2"); shift ;;
+      --parent) if [ "$2" = 0 ]; then args+=(--data-urlencode parent=0); else p=$(task_id "$2") || exit 1; args+=(--data-urlencode "parent=$p"); fi; shift ;;
       --status) args+=(--data-urlencode "status=$2"); shift ;;
       --every) args+=(--data-urlencode "check_every=$2"); shift ;;
       --due) args+=(--data-urlencode "due=$2"); shift ;;

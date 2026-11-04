@@ -36,7 +36,8 @@ CREATE OR REPLACE VIEW api.tasks AS
            FROM board.task_note n
           WHERE ((n.task_id = t.id) AND (n.body <> ''::text))
           ORDER BY n.id DESC
-         LIMIT 1) AS last_note
+         LIMIT 1) AS last_note,
+    path
    FROM board.task t;
 
 

@@ -330,7 +330,7 @@
 	</section>
 
 	<aside>
-		<h3>Participants</h3>
+		<h3>Agents</h3>
 		<ul class="side">
 			{#each agents as a}
 				<li><button class="link" onclick={() => set('involving', a.handle)}>{a.handle}</button>
