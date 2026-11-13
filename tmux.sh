@@ -36,6 +36,10 @@ WORKERS[db-backup]="bash -c 'cd $DIR; trap : INT; while true; do if ./backup.sh;
 # just stops (a backup loop elsewhere silently stopped for months), so it cannot report itself. Alerts
 # when the newest VERIFIED backup (dir with a MANIFEST) is older than BACKUP_STALE_HOURS (36).
 WORKERS[backup-monitor]="bash -c 'cd $DIR; trap : INT; while true; do if msg=\$(./backup.sh --check-stale); then (source tmux.sh; alert_clear backup-stale); else (source tmux.sh; alert_once backup-stale \"backup STALE -- \$msg\"); fi; sleep 3600; done'"
+# idle-nudge (guy, 2026-11-12, #119/23): every 20 min, nudge agents that look idle (no session output
+# or board activity for THRESH_MIN) but have open, actionable (not needs_human) tasks on them, so guy
+# doesn't have to wake them by hand. Logic + guards in idle-nudge.sh (set THRESH_MIN/COOLDOWN_MIN/DRY_RUN).
+WORKERS[idle-nudge]="bash -c 'cd $DIR; trap : INT; while true; do ./idle-nudge.sh >> logs/idle-nudge.log 2>&1 || (source tmux.sh; alert_once idle-nudge \"idle-nudge run FAILED -- see logs/idle-nudge.log\"); sleep 1200; done'"
 # push: browser notifications for humans (Web Push). Sends each new board.attention item once to the
 # browsers that enabled the bell in the UI. Sources .env INSIDE the loop (DBURI + VAPID keys stay off argv).
 WORKERS[push]="bash -c 'cd $DIR/web; trap : INT; while true; do date; (set -a; source $DIR/.env; set +a; exec $NODEBIN push-worker.js) || (source $DIR/tmux.sh; notify_claude \"push FAILED -- push-worker.js exited\"); echo restarting in 10s; sleep 10; done'"
@@ -48,6 +52,7 @@ WORKER_WINDOWS[ui-prod]=app
 WORKER_WINDOWS[db-backup]=ops
 WORKER_WINDOWS[push]=ops
 WORKER_WINDOWS[backup-monitor]=ops
+WORKER_WINDOWS[idle-nudge]=ops
 WORKER_WINDOWS[claude]=claude
 # claude-ui (/claude page): registers its voice-relay worker. Sourced BEFORE notify_claude below so
 # board's own notify_claude wins. The relay needs psycopg: a venv outside the repo (python3 -m venv

@@ -11,11 +11,14 @@
 # carries out remote /login requests from the board UI: types /login, reads the sign-in URL off the
 # pane for the human, types the code the human pasted into the UI, and reports success or the error.
 #
+# Hourly it also reports the Claude session's activity (active minutes + the tasks/threads it mentioned, read off
+# its transcripts) with api.activity_push: the board's /load page.
+#
 # Self-upgrade: every UPGRADE_EVERY seconds it compares WATCH_VERSION with $BOARD_WEB/client/version
 # and, when the board has a newer one, installs the new board + board-watch.sh and exits, so its restart
 # loop (board watch-start, or the project's tmux.sh worker) starts the new version. Bump WATCH_VERSION
 # here to push a change to every agent.
-WATCH_VERSION=15
+WATCH_VERSION=19  # v19: board review (code reviews)
 BOARD_HOME="${BOARD_HOME:-$HOME/.board}"
 source "$BOARD_HOME/config" || { echo "no $BOARD_HOME/config"; exit 1; }
 BOARD_API="${BOARD_API:-@BOARD_API@}"
@@ -326,19 +329,153 @@ claude_pid() {  # the first Claude process under process $1
                   for (q = p; q != "" && q > 1; q = par[q]) if (q == root) { print p; exit 0 }
               exit 1 }'
 }
-check_info() {
-    local t pid cwd dir f tail_
-    t=$(now); [ $((t - L_INFO)) -ge "$INFO_EVERY" ] || return 0
-    L_INFO=$t
-    pid=$(claude_pid "$(tmux display-message -p -t "$T" '#{pane_pid}' 2>/dev/null)") || return 0
+# the transcript directory of the session's Claude process (its cwd, non-alphanumerics as "-")
+claude_dir() {
+    local pid cwd
+    pid=$(claude_pid "$(tmux display-message -p -t "$T" '#{pane_pid}' 2>/dev/null)") || return 1
     cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null)
     [ -n "$cwd" ] || cwd=$(lsof -a -d cwd -p "$pid" -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)
-    [ -n "$cwd" ] || return 0
-    dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$(printf '%s' "$cwd" | sed 's/[^A-Za-z0-9]/-/g')"
+    [ -n "$cwd" ] || return 1
+    printf '%s\n' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$(printf '%s' "$cwd" | sed 's/[^A-Za-z0-9]/-/g')"
+}
+check_info() {
+    local t dir f tail_
+    t=$(now); [ $((t - L_INFO)) -ge "$INFO_EVERY" ] || return 0
+    L_INFO=$t
+    dir=$(claude_dir) || return 0
     f=$(ls -t "$dir"/*.jsonl 2>/dev/null | head -n 1); [ -n "$f" ] || return 0
     tail_=$(tail -c 1000000 "$f" 2>/dev/null | grep -v '"isSidechain":true')     # not subagents' replies
     CLAUDE_MODEL=$(grep -o '"model":"claude-[^"]*"' <<<"$tail_" | tail -n 1 | cut -d'"' -f4)
     CLAUDE_VERSION=$(grep -o '"version":"[0-9][^"]*"' <<<"$tail_" | tail -n 1 | cut -d'"' -f4)
+}
+
+# ---------------------------------------------------------------- Claude activity (hourly, incremental)
+# Which minutes the Claude session was active, and which board objects (tasks, threads) it mentioned in them, read
+# off its transcripts: ${CLAUDE_CONFIG_DIR:-~/.claude}/projects/<the Claude process's cwd>/**/*.jsonl (its sessions and
+# their subagents). Only that directory: several agents can share one unix user (caladan), each in its own directory.
+# While Claude isn't running, the directory found last time ($BOARD_HOME/activity.dir) is read.
+# Every ACTIVITY_EVERY seconds, in the background (a first run reads up to ACTIVITY_DAYS of history), it reads what
+# was appended since the last run ($BOARD_HOME/activity2.state: file, bytes read, last entry's time and kind), turns it
+# into "<minute>\t<entries>\t<refs>" lines with ACTIVITY_AWK and pushes them to api.activity_push. The board derives
+# the periods of activity and the load per task from them (the /load page).
+ACTIVITY_EVERY="${BOARD_ACTIVITY_EVERY:-3600}"
+ACTIVITY_DAYS="${BOARD_ACTIVITY_DAYS:-60}"
+L_ACTIVITY=$(( $(date +%s) - ACTIVITY_EVERY + 120 ))   # first run 2 minutes after start
+ACTIVITY_AWK='
+function epoch(t,   y, m, d, H, M, S, era, yoe, doy, doe) {
+    y = substr(t, 1, 4) + 0; m = substr(t, 6, 2) + 0; d = substr(t, 9, 2) + 0
+    H = substr(t, 12, 2) + 0; M = substr(t, 15, 2) + 0; S = substr(t, 18, 2) + 0
+    if (m <= 2) y--
+    era = int(y / 400); yoe = y - era * 400
+    doy = int((153 * (m > 2 ? m - 3 : m + 9) + 2) / 5) + d - 1
+    doe = yoe * 365 + int(yoe / 4) - int(yoe / 100) + doy
+    return ((era * 146097 + doe - 719468) * 86400) + H * 3600 + M * 60 + S
+}
+function mark(mn) { if (!(mn in cnt)) { cnt[mn] = 0; order[++nm] = mn } }
+function add(mn, r) { if (!((mn, r) in seen)) { seen[mn, r] = 1; tok[mn] = tok[mn] " " r } }
+function grab(s, re, kind,   v, pre, nxt, p) {
+    while (match(s, re)) {
+        v = substr(s, RSTART, RLENGTH); pre = RSTART > 1 ? substr(s, RSTART - 1, 1) : ""
+        p = RSTART > 2 ? substr(s, RSTART - 2, 2) : ""
+        nxt = substr(s, RSTART + RLENGTH, 1)
+        s = substr(s, RSTART + RLENGTH)
+        if (kind == "hash") {
+            if ((pre ~ /[A-Za-z0-9_&]/ && p !~ /\\[nt]/) || nxt ~ /[A-Za-z_]/) continue
+            sub(/^#/, "", v)
+            if (v ~ /\//) { sub(/\/$/, "", v); L[++nl] = "p:" v } else if (length(v) <= 6) L[++nl] = "n:" v
+        } else if (kind == "path") { sub(/^tasks\//, "", v); L[++nl] = "p:" v }
+        else { sub(/^[^0-9]*/, "", v); L[++nl] = kind ":" v }
+    }
+}
+BEGIN { if (gap == "") gap = 120; if (maxbusy == "") maxbusy = 3600; pe += 0 }
+/^\{"type":"api-request/ { next }
+{
+    if (!match($0, /"uuid":"[^"]*","timestamp":"[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]/)) next
+    e = epoch(substr($0, RSTART + RLENGTH - 19, 19))
+    if (index($0, "\"type\":\"assistant\",\"uuid\"")) k = index($0, "\"type\":\"tool_use\"") ? "a" : "e"
+    else if (index($0, "\"type\":\"user\"")) k = index($0, "\"tool_use_id\":") ? "r" : "u"
+    else k = "s"
+    mn = int(e / 60) * 60
+    if (pe > 0 && e > pe && (e - pe <= gap || (pk != "e" && e - pe <= maxbusy)))
+        for (x = int(pe / 60) * 60; x < mn; x += 60) mark(x)
+    mark(mn); cnt[mn]++
+    if (pe == 0 || e >= pe) pe = e
+    if (k != "s") pk = k
+    if (k == "a" || k == "e" || k == "u") {
+        s = $0; gsub(/"signature":"[^"]*"/, "", s)
+        nl = 0
+        grab(s, "#[1-9][0-9]*(\\/[0-9]+)*\\/?", "hash")
+        grab(s, "tasks\\/[0-9]+(\\/[0-9]+)*", "path")
+        grab(s, "\\/m\\/[0-9]+", "m")
+        grab(s, "board task (note |update |link )?[0-9]+", "t")
+        grab(s, "--(task|parent) [0-9]+", "t")
+        grab(s, "board (read|reply|thread|summarize) [0-9]+", "m")
+        if (nl <= 12) for (i = 1; i <= nl; i++) add(mn, L[i])
+        if (k == "u") {
+            # who drove it: a human writing through claude-ui ("[from guy] ..."), or the watcher ("[board] ...",
+            # possibly inside a pasted block)
+            if (match(s, /\[from [A-Za-z0-9_.-]+\]/)) {
+                v = substr(s, RSTART, RLENGTH); sub(/^\[from /, "", v); sub(/\]$/, "", v); add(mn, "u:" v)
+            } else if (index(s, "[board] ")) add(mn, "u:board")
+        }
+    }
+}
+END {
+    for (i = 1; i <= nm; i++) { mn = order[i]; t = tok[mn]; sub(/^ /, "", t); printf "%d\t%d\t%s\n", mn, cnt[mn], t }
+    if (st != "") printf "%d\t%s\n", pe, pk > st
+}'
+# one pass over every transcript; the state is only advanced once the push went through
+activity_run() {
+    local root="$1" st="$BOARD_HOME/activity2.state" w="$BOARD_HOME/activity.tmp"
+    local f size off pe pk n part used fails=0 c
+    [ -n "$root" ] && [ -d "$root" ] || return 0
+    mkdir -p "$w" && rm -f "$w"/*
+    : > "$w/state"; : > "$w/out"
+    while IFS= read -r f; do
+        size=$(wc -c < "$f" 2>/dev/null) || continue
+        IFS=$'\t' read -r _ off pe pk < <(awk -F'\t' -v f="$f" '$1 == f' "$st" 2>/dev/null) || true
+        off=${off:-0}; pe=${pe:-0}
+        [ "$size" -lt "$off" ] && { off=0; pe=0; pk=; }      # rewritten from scratch
+        if [ "$size" -gt "$off" ]; then
+            # only whole lines: the session may be writing the last one right now
+            tail -c +"$((off + 1))" "$f" 2>/dev/null | head -c "$((size - off))" > "$w/chunk"
+            used=$(wc -c < "$w/chunk")
+            if [ "$used" -gt 0 ] && [ "$(tail -c 1 "$w/chunk" | od -An -c | tr -d ' ')" != '\n' ]; then
+                part=$(tail -n 1 "$w/chunk" | wc -c); used=$((used - part + 1))
+                [ "$used" -lt 0 ] && used=0
+                head -c "$used" "$w/chunk" > "$w/chunk2" && mv "$w/chunk2" "$w/chunk"
+            fi
+            : > "$w/st1"
+            awk -v pe="$pe" -v pk="$pk" -v st="$w/st1" "$ACTIVITY_AWK" "$w/chunk" >> "$w/out"
+            IFS=$'\t' read -r pe pk < "$w/st1" 2>/dev/null
+            off=$((off + used))
+        fi
+        printf '%s\t%s\t%s\t%s\n' "$f" "$off" "${pe:-0}" "$pk" >> "$w/state"
+    done < <(find "$root" -name '*.jsonl' -mtime "-$ACTIVITY_DAYS" 2>/dev/null)
+    n=$(wc -l < "$w/out")
+    if [ "$n" -gt 0 ]; then
+        split -l 3000 "$w/out" "$w/push."
+        for c in "$w"/push.*; do
+            rpc activity_push --data-urlencode "data@$c" || { fails=1; log "activity: push failed ($RPC_CODE): $RPC_OUT"; break; }
+        done
+    fi
+    if [ "$fails" = 0 ]; then
+        mv "$w/state" "$st"
+        [ "$n" -gt 0 ] && log "activity: pushed $n active minute(s)"
+    fi
+    rm -rf "$w"
+}
+check_activity() {
+    local t pid dir
+    t=$(now); [ $((t - L_ACTIVITY)) -ge "$ACTIVITY_EVERY" ] || return 0
+    L_ACTIVITY=$t
+    pid=$(cat "$BOARD_HOME/activity.pid" 2>/dev/null)
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && return 0      # the last run is still going
+    dir=$(claude_dir) && [ -n "$dir" ] && printf '%s\n' "$dir" > "$BOARD_HOME/activity.dir"
+    dir=$(cat "$BOARD_HOME/activity.dir" 2>/dev/null)
+    [ -n "$dir" ] || return 0
+    ( activity_run "$dir" ) </dev/null >/dev/null 2>&1 &
+    echo $! > "$BOARD_HOME/activity.pid"
 }
 
 # ---------------------------------------------------------------- main loop
@@ -361,7 +498,7 @@ while true; do
         fi
     fi
 
-    [ -z "$L_ID" ] && { check_session; check_info; }
+    [ -z "$L_ID" ] && { check_session; check_info; check_activity; }
     task=
     rpc watch_sync --data-urlencode "session_state=$SESSION" --data-urlencode "session_detail=$SESSION_DETAIL" \
         --data-urlencode "version=$WATCH_VERSION" --data-urlencode "model=$CLAUDE_MODEL" \

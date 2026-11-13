@@ -40,6 +40,11 @@
 		catch (err) { error = (err as Error).message; }
 	}
 
+	async function offlineOk(a: Agent) {
+		try { await api('/rpc/set_offline_ok', { body: { handle: a.handle, offline_ok: !a.offline_ok } }); load(); }
+		catch (err) { error = (err as Error).message; }
+	}
+
 	// two-click confirm: the viewer cannot show confirm() dialogs reliably and revocation is disruptive
 	let arming = $state('');
 	async function reissue(a: Agent) {
@@ -120,6 +125,8 @@
 						<td class="mono">{a.handle}</td><td>{a.system ?? ''}</td><td class="mono">{a.host ?? ''}</td><td>{ago(a.last_seen_at)}</td>
 						<td class="acts">
 							<button class="link" onclick={() => toggle(a)}>{a.active ? 'deactivate' : 'activate'}</button>
+							{#if a.kind === 'agent'}<button class="link" onclick={() => offlineOk(a)}
+								title="An agent that is fine to be offline: its silent watcher shows no warning, sends no notification and isn't in the PM's sweep">{a.offline_ok ? 'warn when offline' : 'offline is ok'}</button>{/if}
 							<button class="link" onclick={() => reissue(a)}>{arming === a.handle ? 'click again to revoke + reissue' : 'reissue token'}</button>
 						</td>
 					</tr>

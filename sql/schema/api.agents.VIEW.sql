@@ -30,7 +30,27 @@ CREATE OR REPLACE VIEW api.agents AS
     claude_ui_url,
     claude_model,
     claude_version,
-    claude_info_at
+    claude_info_at,
+    ((kind = 'agent'::text) AND active AND (COALESCE(last_seen_at, '-infinity'::timestamp with time zone) < (now() - '00:10:00'::interval))) AS watcher_silent,
+    offline_ok,
+    ((kind = 'agent'::text) AND active AND (COALESCE(session_state, 'ok'::text) = 'ok'::text) AND (COALESCE(last_seen_at, '-infinity'::timestamp with time zone) >= (now() - '00:10:00'::interval)) AND (EXISTS ( SELECT 1
+           FROM board.activity_minute x
+          WHERE (x.handle = a.handle))) AND (NOT (EXISTS ( SELECT 1
+           FROM board.activity_minute x
+          WHERE ((x.handle = a.handle) AND (x.minute >= (now() - '01:00:00'::interval)))))) AND (EXISTS ( SELECT 1
+           FROM board.recipient r
+          WHERE ((r.handle = a.handle) AND (r.notified_at < (now() - '01:00:00'::interval)) AND (r.notified_at > (now() - '3 days'::interval)) AND (NOT (EXISTS ( SELECT 1
+                   FROM board.activity_minute x
+                  WHERE ((x.handle = a.handle) AND (x.minute >= date_trunc('minute'::text, r.notified_at)))))) AND (NOT (EXISTS ( SELECT 1
+                   FROM board.recipient y
+                  WHERE ((y.handle = a.handle) AND (y.read_at >= r.notified_at))))) AND (NOT (EXISTS ( SELECT 1
+                   FROM board.message y
+                  WHERE ((y.sender = a.handle) AND (y.created_at >= r.notified_at))))) AND (NOT (EXISTS ( SELECT 1
+                   FROM board.task_note y
+                  WHERE ((y.author = a.handle) AND (y.created_at >= r.notified_at))))))))) AS stuck,
+    ( SELECT max(x.minute) AS max
+           FROM board.activity_minute x
+          WHERE (x.handle = a.handle)) AS last_output_at
    FROM board.agent a;
 
 

@@ -29,6 +29,12 @@ export default defineConfig({
 		// the dev server is what nginx serves publicly at PUBLIC_ORIGIN (see tmux.sh WORKERS[ui])
 		allowedHosts: publicHosts(),
 		// claude-ui (../claude-ui/web) sits outside web/; let the dev server read it
-		fs: { allow: [searchForWorkspaceRoot(process.cwd()), '../claude-ui'] }
+		// doc:vite-hardening R3/R4 (#222): minimal allow list; deny secrets, dotdirs and system paths
+		fs: {
+			strict: true,
+			allow: [searchForWorkspaceRoot(process.cwd()), '../claude-ui'],
+			deny: ['.env', '.env.*', '*.{pem,crt,key,p12,pfx}', '**/.git/**', '**/.ssh/**', '**/id_rsa*', '**/.npmrc',
+				'**/.aws/**', '**/.config/**', '/proc/**', '/sys/**', '/etc/**', '/root/**', '/var/log/**']
+		}
 	}
 });

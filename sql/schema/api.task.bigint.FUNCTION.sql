@@ -20,7 +20,12 @@ BEGIN
     FROM api.task_threads x WHERE x.task_id = t.id;
     SELECT string_agg(format('  %s %s: %s', board.fmt_ts(n.created_at), n.author,
                              concat_ws(' | ', '[' || n.change || ']', nullif(n.body, ''))), E'\n' ORDER BY n.id) INTO log
-    FROM (SELECT * FROM board.task_note n WHERE n.task_id = t.id ORDER BY n.id DESC LIMIT 15) n;
+    -- the latest 15, plus the latest 10 by anyone but the PM: its own check-in notes must not push the
+    -- owners' reports (and the human's answers) out of view
+    FROM board.task_note n
+    WHERE n.id IN (SELECT x.id FROM board.task_note x WHERE x.task_id = t.id ORDER BY x.id DESC LIMIT 15)
+       OR n.id IN (SELECT x.id FROM board.task_note x WHERE x.task_id = t.id AND x.author <> (SELECT pm FROM board.policy)
+                   ORDER BY x.id DESC LIMIT 10);
     RETURN concat_ws(E'\n',
         board.fmt_task(t),
         CASE WHEN path IS NOT NULL THEN 'Under:    ' || path END,
@@ -29,7 +34,7 @@ BEGIN
         CASE WHEN t.description <> '' THEN E'\n' || t.description END,
         E'\nSubtasks:', coalesce(subs, '  (none)'),
         E'\nThreads:', coalesce(ths, '  (none)'),
-        E'\nLog (latest 15):', coalesce(log, '  (empty)'),
+        E'\nLog (latest 15, plus the 10 latest not by the PM):', coalesce(log, '  (empty)'),
         E'\n-- note: board task note ' || t.id || ' -m "..." | status: board task update ' || t.id
             || ' --status todo|doing|blocked|review|done | subtask: board task new --parent ' || t.id || ' --title "..." --assignee H');
 END $$;

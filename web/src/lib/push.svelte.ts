@@ -35,7 +35,12 @@ export async function pushEnable() {
 		await api('/rpc/push_subscribe', { body: { endpoint: j.endpoint, p256dh: j.keys?.p256dh, auth: j.keys?.auth, user_agent: navigator.userAgent } });
 		push.on = true;
 	} catch (e) {
-		push.error = (e as Error).message;
+		const m = (e as Error).message;
+		// Firefox says only "Error retrieving push subscription." (AbortError) when it can't reach its own push
+		// service (Mozilla autopush): push turned off in about:config, a private window, or a blocked connection
+		push.error = (e as Error).name === 'AbortError' || /retrieving push subscription/i.test(m)
+			? `${m} The browser couldn't reach its push service (permission is fine). Firefox: check about:config dom.push.enabled = true and dom.push.connection.enabled = true, not a private window, and that wss://push.services.mozilla.com isn't blocked.`
+			: m;
 	} finally {
 		push.busy = false;
 	}

@@ -130,6 +130,7 @@ export type Agent = {
 	claude_model: string | null; // the session's model id, e.g. claude-opus-5-5 (watcher v13+)
 	claude_version: string | null; // its Claude Code version, e.g. 2.1.312
 	claude_info_at: string | null;
+	offline_ok: boolean; // an admin marked it fine to be offline: a silent watcher is no warning
 };
 
 // "claude-opus-5-5" / "claude-sonnet-4-5-20250929" -> "Opus 5.5" / "Sonnet 4.5"; anything else as is
@@ -168,8 +169,8 @@ export const sessionBlocked = (a: { active: boolean; kind: string; session_state
 	a.active && a.kind === 'agent' && !!a.session_state && a.session_state in SESSION_PROBLEM;
 // a watcher polls every ~10 s and bumps last_seen_at; silent this long = dead watcher, host down or offline
 export const WATCHER_SILENT_MS = 10 * 60_000;
-export const watcherSilent = (a: { active: boolean; kind: string; last_seen_at: string | null }) =>
-	a.active && a.kind === 'agent' && (!a.last_seen_at || Date.now() - new Date(a.last_seen_at).getTime() > WATCHER_SILENT_MS);
+export const watcherSilent = (a: { active: boolean; kind: string; last_seen_at: string | null; offline_ok?: boolean }) =>
+	a.active && a.kind === 'agent' && !a.offline_ok && (!a.last_seen_at || Date.now() - new Date(a.last_seen_at).getTime() > WATCHER_SILENT_MS);
 
 // tasks (kanban): see board.task in sql/bootstrap.sql
 export const TASK_STATUSES = ['todo', 'doing', 'blocked', 'ongoing', 'review', 'done'] as const; // board columns; 'cancelled' is hidden
@@ -202,7 +203,26 @@ export type Task = {
 	notes: number;
 	last_note: string | null;
 	path: string; // semantic id: "119" top level, "119/3" its 3rd subtask (board.task.path)
+	umbrella: boolean; // cross-project top-level task (#119/): its subtasks belong to their assignees' projects
+	// doc:systems-and-projects: a project node (kind 'project', with slug/url) or a task; a task belongs to its
+	// nearest project node (project_id), else to the system it names (system work), else to Operations
+	kind: 'task' | 'project';
+	slug: string | null;
+	url: string | null;
+	system: string | null;
+	project_id: number | null;
+	assignee_system: string | null; // the system its assignee runs (labels #119/-style umbrella subtasks)
+	human_level: 1 | 2 | 3; // how urgent its "needs you" is: 1 urgent, 2 soon, 3 whenever (api.task_urgency)
 };
+export const HUMAN_LEVEL = ['', 'Urgent', 'Soon', 'Whenever'] as const;
+export type ProjectInfo = { id: number; path: string; slug: string; title: string; status: TaskStatus; lead: string | null;
+	url: string | null; description: string | null; parent_project_id: number | null;
+	systems: { system: string; role: string }[];
+	clients: { client: string; name: string; for_client: string | null; for_name: string | null; inherited: boolean }[];
+	open_tasks: number; needs_you: number };
+export type SystemInfo = { slug: string; name: string; kind: string; owner: string | null; repo: string | null; description: string | null;
+	instances: { agent: string; label: string | null; host: string | null }[];
+	projects: { id: number; path: string; slug: string | null; title: string; role: string }[]; open_tasks: number };
 // how a task is written and linked: "#119/" (top level; bare "#119" is a message) or "#119/3"
 export const taskRef = (t: { path: string; parent_id: number | null }) => `#${t.path}${t.parent_id ? '' : '/'}`;
 export const taskHref = (t: { path: string }) => `/tasks/${t.path}`;

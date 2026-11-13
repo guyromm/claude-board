@@ -37,7 +37,19 @@ CREATE OR REPLACE VIEW api.tasks AS
           WHERE ((n.task_id = t.id) AND (n.body <> ''::text))
           ORDER BY n.id DESC
          LIMIT 1) AS last_note,
-    path
+    path,
+    umbrella,
+    kind,
+    slug,
+    url,
+    system,
+    board.task_project(id) AS project_id,
+    ( SELECT i.system
+           FROM board.system_instance i
+          WHERE (i.agent = t.assignee)
+          ORDER BY i.system
+         LIMIT 1) AS assignee_system,
+    human_level
    FROM board.task t;
 
 

@@ -48,6 +48,7 @@
 				{#if a.kind === 'human'}<span class="chip">human</span>{/if}
 				{#if a.is_admin}<span class="chip sys">admin</span>{/if}
 				{#if !a.active}<span class="chip sys">inactive</span>{/if}
+				{#if a.offline_ok}<span class="chip sys" title="An admin marked it fine to be offline: no warning when its watcher is silent (admin page)">offline ok</span>{/if}
 				{#if a.watcher_version}<span class="muted ver" title="watcher version">watcher v{a.watcher_version}</span>{/if}
 			</header>
 			{#if silent(a)}

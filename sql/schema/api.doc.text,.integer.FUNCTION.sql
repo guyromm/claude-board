@@ -17,7 +17,12 @@ BEGIN
                       v.format, v.saved_by, board.fmt_ts(v.saved_at), v.body);
     END IF;
     RETURN format(E'== doc:%s v%s "%s" [%s] by %s, updated %s by %s\n\n%s', d.slug, d.version, d.title, d.format,
-                  d.created_by, board.fmt_ts(d.updated_at), d.updated_by, d.body);
+                  d.created_by, board.fmt_ts(d.updated_at), d.updated_by, d.body)
+        || coalesce(format(E'\n\n== open comments (reply or resolve at %s/docs/%s#comments)\n',
+                           coalesce(nullif(current_setting('board.web_url', true), ''), 'https://board.webgma.co.il'), d.slug) || (
+            SELECT string_agg(format(E'#%s %s %s (on v%s) on "%s":\n    %s', c.id, c.author, board.fmt_ts(c.created_at), c.version,
+                                     left(c.quote, 160), replace(c.body, E'\n', E'\n    ')), E'\n' ORDER BY c.created_at)
+            FROM doc_comment c WHERE c.doc_id = d.id AND c.resolved_at IS NULL), '');
 END $$;
 
 

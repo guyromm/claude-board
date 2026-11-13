@@ -13,7 +13,7 @@ BEGIN
     IF push_subscribe.endpoint !~ '^https://' THEN RAISE EXCEPTION 'endpoint must be an https URL'; END IF;
     INSERT INTO board.push_subscription AS s (endpoint, handle, p256dh, auth, user_agent, test_requested_at)
     VALUES (push_subscribe.endpoint, me, push_subscribe.p256dh, push_subscribe.auth, left(push_subscribe.user_agent, 300), now())
-    ON CONFLICT (endpoint) DO UPDATE SET handle = me, p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth,
+    ON CONFLICT ON CONSTRAINT push_subscription_pkey DO UPDATE SET handle = me, p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth,
         user_agent = EXCLUDED.user_agent, test_requested_at = now(), last_error = NULL;
     RETURN json_build_object('subscribed', true, 'worker', EXISTS (SELECT 1 FROM board.push_config));
 END $$;

@@ -6,6 +6,7 @@
 	import { every, REFRESH_MS } from '#lib/poll.ts';
 	import { push, pushSupported, pushRefresh, pushEnable, pushDisable } from '#lib/push.svelte.ts';
 	import ClaudeDock from '../../../claude-ui/web/ClaudeDock.svelte';
+	import { boardRenderers } from '#lib/claudeRenderers.ts';
 	import type { LayoutProps } from './$types';
 
 	// the domain label after "board." (board.example.com -> ".example") as the logo's suffix
@@ -23,14 +24,18 @@
 	// agents whose Claude session needs a human (logged out, a dialog open, Claude not running), as
 	// their watchers report it: shown on every page
 	// ... and agents whose watcher has gone silent (no poll for 10 minutes)
-	type Watched = { handle: string; session_state: string | null; last_seen_at: string | null; active: boolean; kind: string };
+	// ... and agents that look STUCK: a notification typed into the session an hour+ ago got no reaction at all
+	type Watched = { handle: string; session_state: string | null; last_seen_at: string | null; active: boolean; kind: string; offline_ok: boolean;
+		stuck: boolean; last_output_at: string | null };
 	let blocked = $state<{ handle: string; problem: string }[]>([]);
 	$effect(() => {
 		if (!session.current) return;
-		const check = () => api<Watched[]>('/agents?select=handle,session_state,last_seen_at,active,kind&active=is.true&kind=eq.agent')
+		const check = () => api<Watched[]>('/agents?select=handle,session_state,last_seen_at,active,kind,offline_ok,stuck,last_output_at&active=is.true&kind=eq.agent')
 			.then((r) => (blocked = r.data.flatMap((a) =>
 				watcherSilent(a) ? [{ handle: a.handle, problem: `board watcher silent for ${ago(a.last_seen_at).replace(/ ago$/, '')}` }]
-				: sessionBlocked(a) ? [{ handle: a.handle, problem: SESSION_PROBLEM[a.session_state!] }] : [])))
+				: sessionBlocked(a) ? [{ handle: a.handle, problem: SESSION_PROBLEM[a.session_state!] }]
+				: a.stuck ? [{ handle: a.handle, problem: `not reacting to board messages for 1h+ (no output since ${ago(a.last_output_at).replace(/ ago$/, '')} ago): stuck in a command or a dialog? open its chat` }]
+				: [])))
 			.catch(() => {});
 		check();
 		return every(REFRESH_MS, check);
@@ -42,9 +47,12 @@
 	const nav = [
 		{ href: '/', label: 'Messages' },
 		{ href: '/tasks', label: 'Tasks', key: 't' },
+		{ href: '/projects', label: 'Projects', key: 'j' },
 		{ href: '/docs', label: 'Docs', key: 'd' },
+		{ href: '/reviews', label: 'Reviews', key: 'r' },
 		{ href: '/agents', label: 'Agents', key: 'p' },
 		{ href: '/banter', label: 'Banter', key: 'b' },
+		{ href: '/load', label: 'Load', key: 'l' },
 		{ href: '/compose', label: 'Compose' }
 	];
 	const adminNav = [
@@ -107,7 +115,7 @@
 {/if}
 
 <!-- the task board is a kanban: give it the whole window width -->
-<main class:wide={/^\/tasks(\/(todo|doing|blocked|ongoing|review|done|cancelled))?$|^\/docs\/[^/]+$|^\/banter$/.test(page.url.pathname)}>
+<main class:wide={/^\/tasks(\/(todo|doing|blocked|ongoing|review|done|cancelled))?$|^\/docs\/[^/]+$|^\/banter$|^\/load$/.test(page.url.pathname)}>
 	{#if session.current || PUBLIC.includes(page.url.pathname)}
 		{@render children()}
 	{/if}
@@ -117,11 +125,15 @@
      /claude is the same chat full page, so the dock steps aside there -->
 {#if session.current}
 	<ClaudeDock pgrst={API} getToken={() => session.current?.token ?? null} isAdmin={() => !!session.current?.is_admin}
-		hidden={!session.current.is_admin || page.url.pathname.startsWith('/claude')} />
+		hidden={!session.current.is_admin || page.url.pathname.startsWith('/claude')} renderers={boardRenderers} />
 {/if}
 
 <style>
 	:global {
+		/* claude-ui chat: board references (lib/claudeRenderers.ts) that need guy, or are done/closed */
+		a.cui-ref.cui-needs { color: var(--warn); font-weight: 600; }
+		a.cui-ref.cui-needs::after { content: ' ⚑'; font-size: 0.8em; }
+		a.cui-ref.cui-closed { opacity: 0.65; }
 		:root {
 			--bg: #f6f5f1;
 			--panel: #ffffff;

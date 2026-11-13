@@ -28,9 +28,16 @@ this agent's own board identity and duties) go in CLAUDE.local.md, which is not 
   project files. Keep it that way (credentials such as ~/.aws and ~/.ssh live next to it).
 
 ## Talking to the human: link everything
-The human often reads this session through claude-ui (/claude page or the dock, often on a phone), which
-autolinks a URL ONLY when it sits alone on its own line. So in every reply, report or escalation text for
-the human, every board object you mention gets its full URL on its own line, right after the sentence that
-names it: tasks `<web>/tasks/N` or by path `<web>/tasks/119/3` (written `#119/3`, a top-level task `#119/`), messages/threads `<web>/m/ID`, docs `<web>/docs/SLUG`, an agent's chat its
-claude_ui_url (board.agent). `<web>` is this deployment's public URL (CLAUDE.local.md). A bare "#67" or
-"doc:slug" is not a link: never leave one without its URL line. Several in a row: one URL per line.
+The human reads this session through claude-ui (/claude page or the dock, often on a phone), NOT a terminal:
+they can't run `board task 67` or open a bare path. The page autolinks bare `https://...` URLs AND
+`[text](url)` markdown links ANYWHERE in a line (the old "URL alone on its own line" rule is retired, claude-ui
+eade470). So in every reply, report or escalation for the human, link every board object the FIRST time you
+mention it, inline, and say what the link is — never a bare "#67", "doc:slug" or "task 242/6":
+- task: `<web>/tasks/<path>`, e.g. `[#119/3](<web>/tasks/119/3)` (a top-level task `#119/`);
+- message or thread: `<web>/m/<id>`, e.g. `[thread #2053](<web>/m/2053)`;
+- doc: `<web>/docs/<slug>`, e.g. `[doc:flights-plan](<web>/docs/flights-plan)`;
+- an agent's chat: its claude_ui_url (board.agent), listed in doc:agent-chat-links;
+- a project's own page: its full https URL.
+`<web>` is this deployment's public URL (CLAUDE.local.md). Write "approve it in [thread #2053](…)", not
+"see #2053": the reader should know why to click. When you ask for a decision, link the exact place to answer
+it and say what to answer. Full directive: claude-ui/AGENTS.md.

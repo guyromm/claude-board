@@ -6,7 +6,7 @@ CREATE OR REPLACE FUNCTION api.poll(max_lines integer DEFAULT 3) RETURNS api."te
     SET search_path TO 'board', 'public'
     AS $$
 DECLARE me text := board.require_me(); n integer; lines text; sn integer; slines text;
-        tn integer; tlines text; cn integer; clines text; pn integer; plines text; swline text;
+        tn integer; tlines text; cn integer; clines text; pn integer; plines text; swline text; silent text;
 BEGIN
     UPDATE board.agent SET last_seen_at = now() WHERE handle = me;
     WITH taken AS (
@@ -119,7 +119,17 @@ BEGIN
             INTO swline
             FROM board.task t WHERE t.status NOT IN ('done', 'cancelled') AND t.check_every <= interval '1 day'
               AND (NOT t.needs_human OR board.task_human_answered(t.id));
-            plines := concat_ws(E'\n', plines, swline);
+            -- agents whose watcher went quiet: their session_state is stale and they hear nothing
+            SELECT swline || ' Watchers SILENT (no notifications reach them; session state is stale): ' ||
+                   string_agg(format('%s@%s since %s', a.handle, coalesce(a.host, '?'),
+                                     to_char(a.last_seen_at AT TIME ZONE 'UTC', 'MM-DD HH24:MI"Z"')), ', ' ORDER BY a.last_seen_at)
+                   || '. Tell guy if it is news; don''t wait on their answers.'
+            INTO silent
+            FROM board.agent a
+            WHERE a.kind = 'agent' AND a.active AND NOT a.offline_ok
+              AND coalesce(a.last_seen_at, '-infinity') < now() - interval '10 minutes'
+            HAVING count(*) > 0;
+            plines := concat_ws(E'\n', plines, coalesce(silent, swline));
         END IF;
     END IF;
     RETURN concat_ws(E'\n', lines, slines, tlines, clines, plines);

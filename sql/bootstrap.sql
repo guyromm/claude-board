@@ -179,6 +179,9 @@ ALTER TABLE board.agent ADD COLUMN IF NOT EXISTS session_detail text;         --
 ALTER TABLE board.agent ADD COLUMN IF NOT EXISTS session_checked_at timestamptz;
 ALTER TABLE board.agent ADD COLUMN IF NOT EXISTS session_changed_at timestamptz;
 ALTER TABLE board.agent ADD COLUMN IF NOT EXISTS watcher_version integer;     -- NULL: watcher predates health checks
+-- set by an admin (api.set_offline_ok) for agents that are fine to be offline (on a desktop that sleeps, run on
+-- demand): a silent watcher is then no warning, no push and no PM sweep line (guy, 2026-11-07: bitpay-exporter)
+ALTER TABLE board.agent ADD COLUMN IF NOT EXISTS offline_ok boolean NOT NULL DEFAULT false;
 -- the Claude session's model and Claude Code version, read by the watcher (v13+) from the session's transcript
 ALTER TABLE board.agent ADD COLUMN IF NOT EXISTS claude_model text;           -- e.g. claude-opus-5-5
 ALTER TABLE board.agent ADD COLUMN IF NOT EXISTS claude_version text;         -- e.g. 2.1.312
@@ -220,6 +223,44 @@ CREATE TABLE IF NOT EXISTS board.thread_summary (
     prompted_through   bigint,                     -- newest message id the summarizer was prompted for
     prompted_at        timestamptz
 );
+
+-- every summary a thread has had (thread_summary keeps only the latest), so a message can be shown with
+-- the digest as it stood at that point (/banter). Written by the trigger below; the rows from before it
+-- existed were seeded from the summary current then, and from the summarizer's transcripts (source).
+CREATE TABLE IF NOT EXISTS board.thread_summary_version (
+    id                 bigserial PRIMARY KEY,
+    thread_id          bigint NOT NULL REFERENCES board.message ON DELETE CASCADE,
+    status             text,
+    needs_human        boolean NOT NULL DEFAULT false,
+    human_reason       text,
+    summary            text,
+    summarized_through bigint,
+    summarized_at      timestamptz,
+    summarized_by      text,
+    source             text NOT NULL DEFAULT 'live'    -- live | seed | transcript
+);
+CREATE INDEX IF NOT EXISTS thread_summary_version_idx ON board.thread_summary_version (thread_id, summarized_through);
+CREATE OR REPLACE FUNCTION board.thread_summary_versioned() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.summary IS NOT NULL AND (TG_OP = 'INSERT' OR NEW.summarized_at IS DISTINCT FROM OLD.summarized_at) THEN
+        INSERT INTO board.thread_summary_version (thread_id, status, needs_human, human_reason, summary,
+                                                  summarized_through, summarized_at, summarized_by)
+        VALUES (NEW.thread_id, NEW.status, NEW.needs_human, NEW.human_reason, NEW.summary,
+                NEW.summarized_through, NEW.summarized_at, NEW.summarized_by);
+    END IF;
+    RETURN NULL;
+END $$;
+DROP TRIGGER IF EXISTS thread_summary_versioned ON board.thread_summary;
+CREATE TRIGGER thread_summary_versioned AFTER INSERT OR UPDATE ON board.thread_summary
+    FOR EACH ROW EXECUTE FUNCTION board.thread_summary_versioned();
+INSERT INTO board.thread_summary_version (thread_id, status, needs_human, human_reason, summary,
+                                          summarized_through, summarized_at, summarized_by, source)
+SELECT s.thread_id, s.status, s.needs_human, s.human_reason, s.summary, s.summarized_through, s.summarized_at,
+       s.summarized_by, 'seed'
+FROM board.thread_summary s
+WHERE s.summary IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM board.thread_summary_version v
+                  WHERE v.thread_id = s.thread_id AND v.summarized_at = s.summarized_at);
 
 -- Tasks: a tree (parent_id), one responsible assignee each, a status column on the UI's kanban board,
 -- a progress log (task_note) and the conversations (threads) that belong to them. The project manager
@@ -270,9 +311,67 @@ CREATE INDEX IF NOT EXISTS task_assignee_idx ON board.task (assignee);
 ALTER TABLE board.task ADD COLUMN IF NOT EXISTS path text;
 ALTER TABLE board.task ADD COLUMN IF NOT EXISTS seq integer;          -- its number under its parent
 ALTER TABLE board.task ADD COLUMN IF NOT EXISTS child_seq integer NOT NULL DEFAULT 0;  -- last number given to a child
+-- a cross-project top-level task (#119/ daily commit review, #65/ self-inspection): its subtasks each belong
+-- to their assignee's own project, so the UI names them after the assignee, not after this task
+ALTER TABLE board.task ADD COLUMN IF NOT EXISTS umbrella boolean NOT NULL DEFAULT false;
 CREATE TABLE IF NOT EXISTS board.task_alias (
     path    text PRIMARY KEY,
     task_id bigint NOT NULL REFERENCES board.task ON DELETE CASCADE
+);
+
+-- AGENTS, SYSTEMS, PROJECTS (guy, 2026-11-07, doc:systems-and-projects). An agent is who works (a handle);
+-- a system is what runs (one owner agent, possibly several instances, each run by an agent); a project is
+-- what for: a product with a goal, a lead and the systems it uses. Projects are task nodes (kind 'project')
+-- and nest like tasks; a task belongs to its nearest project ancestor. Work on a system outside any project
+-- names the system; a task with neither is Operations (backups, check-ups, commit reviews).
+CREATE TABLE IF NOT EXISTS board.system (
+    slug        text PRIMARY KEY CHECK (slug ~ '^[a-z0-9][a-z0-9-]*$'),
+    name        text NOT NULL,
+    kind        text NOT NULL DEFAULT 'service',      -- platform | collector | gateway | infra | app | site | service
+    owner       text REFERENCES board.agent ON UPDATE CASCADE,
+    repo        text,
+    description text,
+    created_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS board.system_instance (     -- the agent that runs (an instance of) a system
+    system text NOT NULL REFERENCES board.system ON UPDATE CASCADE ON DELETE CASCADE,
+    agent  text NOT NULL REFERENCES board.agent ON UPDATE CASCADE ON DELETE CASCADE,
+    label  text,                                       -- "caladan dev", "consumer", ...
+    PRIMARY KEY (system, agent)
+);
+ALTER TABLE board.task ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'task';
+ALTER TABLE board.task DROP CONSTRAINT IF EXISTS task_kind_check;
+ALTER TABLE board.task ADD CONSTRAINT task_kind_check CHECK (kind IN ('task', 'project'));
+ALTER TABLE board.task ADD COLUMN IF NOT EXISTS slug text;                -- projects: short name ("pethelp")
+ALTER TABLE board.task ADD COLUMN IF NOT EXISTS url text;                 -- projects: the product's site
+ALTER TABLE board.task ADD COLUMN IF NOT EXISTS system text REFERENCES board.system ON UPDATE CASCADE;
+-- how urgent a "needs you" is (guy 2026-11-10): 1 urgent, 2 soon, 3 whenever. A new escalation starts at 2 unless it
+-- comes with a level (trigger below); the PM, the assignee or the human re-rates it with api.task_urgency.
+-- /tasks lists Needs you by it. Meaningless while needs_human is false.
+ALTER TABLE board.task ADD COLUMN IF NOT EXISTS human_level smallint NOT NULL DEFAULT 2;
+DO $$ BEGIN
+    ALTER TABLE board.task ADD CONSTRAINT task_human_level_check CHECK (human_level BETWEEN 1 AND 3);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+CREATE UNIQUE INDEX IF NOT EXISTS task_slug_idx ON board.task (slug) WHERE slug IS NOT NULL;
+CREATE TABLE IF NOT EXISTS board.project_system (      -- the systems a project uses
+    project_id bigint NOT NULL REFERENCES board.task ON DELETE CASCADE,
+    system     text NOT NULL REFERENCES board.system ON UPDATE CASCADE ON DELETE CASCADE,
+    role       text NOT NULL DEFAULT 'uses',
+    PRIMARY KEY (project_id, system)
+);
+-- clients: a project may be done for one or more clients, and a client for its own client (Roblox analytics:
+-- Watchful, for Meta). Set on a project node; its subprojects inherit them. Visible to every agent (guy).
+CREATE TABLE IF NOT EXISTS board.client (
+    slug  text PRIMARY KEY CHECK (slug ~ '^[a-z0-9][a-z0-9-]*$'),
+    name  text NOT NULL,
+    kind  text NOT NULL DEFAULT 'organisation' CHECK (kind IN ('organisation', 'person')),
+    notes text
+);
+CREATE TABLE IF NOT EXISTS board.project_client (
+    project_id bigint NOT NULL REFERENCES board.task ON DELETE CASCADE,
+    client     text NOT NULL REFERENCES board.client ON UPDATE CASCADE ON DELETE CASCADE,
+    for_client text REFERENCES board.client ON UPDATE CASCADE,
+    PRIMARY KEY (project_id, client)
 );
 
 CREATE OR REPLACE FUNCTION board.task_path_ins() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -553,7 +652,29 @@ SELECT a.handle, a.kind, a.display_name, a.host, a.tmux_target, a.system, a.desc
        (SELECT count(*) FROM board.message m WHERE m.sender = a.handle) AS sent_count,
        (SELECT count(*) FROM board.recipient r WHERE r.handle = a.handle) AS received_count,
        a.session_state, a.session_detail, a.session_checked_at, a.session_changed_at, a.watcher_version,
-       a.claude_ui_url, a.claude_model, a.claude_version, a.claude_info_at
+       a.claude_ui_url, a.claude_model, a.claude_version, a.claude_info_at,
+       -- a watcher polls every ~10 s and bumps last_seen_at; silent 10 min = dead watcher, host down or offline.
+       -- session_state is then stale (the last thing the watcher reported). Same rule as watcherSilent in the UI.
+       (a.kind = 'agent' AND a.active AND coalesce(a.last_seen_at, '-infinity') < now() - interval '10 minutes') AS watcher_silent,
+       a.offline_ok,
+       -- STUCK (guy, 11-13; pethelp hung ~17 h inside one command while its state read 'ok'): the watcher is alive
+       -- and the session looks fine, but a board notification typed into it 60+ min ago got no output at all
+       -- (a working Claude reacts within minutes). Only for agents whose watcher reports output (v16+).
+       (a.kind = 'agent' AND a.active AND coalesce(a.session_state, 'ok') = 'ok'
+        AND coalesce(a.last_seen_at, '-infinity') >= now() - interval '10 minutes'
+        AND EXISTS (SELECT 1 FROM board.activity_minute x WHERE x.handle = a.handle)
+        AND NOT EXISTS (SELECT 1 FROM board.activity_minute x WHERE x.handle = a.handle AND x.minute >= now() - interval '60 minutes')
+        -- a notification was typed into the session 60+ min ago (within 3 days) and nothing came out after it
+        AND EXISTS (SELECT 1 FROM board.recipient r
+                    WHERE r.handle = a.handle AND r.notified_at < now() - interval '60 minutes'
+                      AND r.notified_at > now() - interval '3 days'
+                      AND NOT EXISTS (SELECT 1 FROM board.activity_minute x WHERE x.handle = a.handle
+                                      AND x.minute >= date_trunc('minute', r.notified_at))
+                      -- any other sign of life since then: a read, a post, a task note
+                      AND NOT EXISTS (SELECT 1 FROM board.recipient y WHERE y.handle = a.handle AND y.read_at >= r.notified_at)
+                      AND NOT EXISTS (SELECT 1 FROM board.message y WHERE y.sender = a.handle AND y.created_at >= r.notified_at)
+                      AND NOT EXISTS (SELECT 1 FROM board.task_note y WHERE y.author = a.handle AND y.created_at >= r.notified_at))) AS stuck,
+       (SELECT max(x.minute) FROM board.activity_minute x WHERE x.handle = a.handle) AS last_output_at
 FROM board.agent a;
 
 CREATE OR REPLACE VIEW api.messages AS
@@ -580,6 +701,12 @@ FROM (SELECT m.thread_id, count(*) AS n, max(m.id) AS last_id, max(m.created_at)
       FROM board.message m GROUP BY m.thread_id) t
 JOIN board.message r ON r.id = t.thread_id
 LEFT JOIN board.thread_summary s ON s.thread_id = t.thread_id;
+
+-- a thread's summaries over time (board.thread_summary_version), oldest first
+CREATE OR REPLACE VIEW api.thread_summary_versions AS
+SELECT v.id, v.thread_id, v.status, v.needs_human, v.human_reason, v.summary, v.summarized_through,
+       v.summarized_at, v.summarized_by, v.source
+FROM board.thread_summary_version v;
 
 -- both directions of board.thread_link, from each thread's point of view. rel: 'continues' (this thread
 -- continues linked_id), 'continued in' (linked_id continues this one), or 'related'
@@ -888,7 +1015,7 @@ $$;
 CREATE OR REPLACE FUNCTION api.poll(max_lines integer DEFAULT 3) RETURNS api."text/plain"
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = board, public AS $$
 DECLARE me text := board.require_me(); n integer; lines text; sn integer; slines text;
-        tn integer; tlines text; cn integer; clines text; pn integer; plines text; swline text;
+        tn integer; tlines text; cn integer; clines text; pn integer; plines text; swline text; silent text;
 BEGIN
     UPDATE board.agent SET last_seen_at = now() WHERE handle = me;
     WITH taken AS (
@@ -1001,7 +1128,17 @@ BEGIN
             INTO swline
             FROM board.task t WHERE t.status NOT IN ('done', 'cancelled') AND t.check_every <= interval '1 day'
               AND (NOT t.needs_human OR board.task_human_answered(t.id));
-            plines := concat_ws(E'\n', plines, swline);
+            -- agents whose watcher went quiet: their session_state is stale and they hear nothing
+            SELECT swline || ' Watchers SILENT (no notifications reach them; session state is stale): ' ||
+                   string_agg(format('%s@%s since %s', a.handle, coalesce(a.host, '?'),
+                                     to_char(a.last_seen_at AT TIME ZONE 'UTC', 'MM-DD HH24:MI"Z"')), ', ' ORDER BY a.last_seen_at)
+                   || '. Tell guy if it is news; don''t wait on their answers.'
+            INTO silent
+            FROM board.agent a
+            WHERE a.kind = 'agent' AND a.active AND NOT a.offline_ok
+              AND coalesce(a.last_seen_at, '-infinity') < now() - interval '10 minutes'
+            HAVING count(*) > 0;
+            plines := concat_ws(E'\n', plines, coalesce(silent, swline));
         END IF;
     END IF;
     RETURN concat_ws(E'\n', lines, slines, tlines, clines, plines);
@@ -1261,6 +1398,51 @@ CREATE OR REPLACE FUNCTION board.fmt_age(i interval) RETURNS text LANGUAGE sql I
 $$;
 
 -- for the web UI (kanban)
+-- the nearest project node at or above a task (NULL: system work or operations)
+CREATE OR REPLACE FUNCTION board.task_project(id bigint) RETURNS bigint
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = board, public AS $$
+    WITH RECURSIVE up AS (
+        SELECT t.id, t.parent_id, t.kind, 0 AS d FROM board.task t WHERE t.id = task_project.id
+        UNION ALL
+        SELECT p.id, p.parent_id, p.kind, up.d + 1 FROM board.task p JOIN up ON p.id = up.parent_id WHERE up.kind <> 'project'
+    )
+    SELECT up.id FROM up WHERE up.kind = 'project' ORDER BY d LIMIT 1
+$$;
+
+-- every project node, with its parent project, lead, systems and clients (own and inherited)
+CREATE OR REPLACE VIEW api.projects AS
+SELECT t.id, t.path, t.slug, t.title, t.status, t.assignee AS lead, t.url, t.description,
+       board.task_project(t.parent_id) AS parent_project_id,
+       coalesce((SELECT json_agg(json_build_object('system', ps.system, 'role', ps.role) ORDER BY ps.system)
+                 FROM board.project_system ps WHERE ps.project_id = t.id), '[]') AS systems,
+       coalesce((SELECT json_agg(json_build_object('client', c.slug, 'name', c.name, 'for_client', pc.for_client,
+                                                   'for_name', f.name, 'inherited', pc.project_id <> t.id) ORDER BY c.name)
+                 FROM board.project_client pc JOIN board.client c ON c.slug = pc.client
+                 LEFT JOIN board.client f ON f.slug = pc.for_client
+                 WHERE pc.project_id IN (SELECT a.id FROM board.task a WHERE t.path = a.path OR t.path LIKE a.path || '/%')), '[]') AS clients,
+       (SELECT count(*) FROM board.task x WHERE x.path LIKE t.path || '/%' AND x.kind = 'task'
+          AND x.status NOT IN ('done', 'cancelled')) AS open_tasks,
+       (SELECT count(*) FROM board.task x WHERE (x.id = t.id OR x.path LIKE t.path || '/%') AND x.needs_human
+          AND x.status NOT IN ('done', 'cancelled')) AS needs_you
+FROM board.task t WHERE t.kind = 'project';
+
+-- every system: its owner, instances (agent + host), the projects that use it and its open system work
+CREATE OR REPLACE VIEW api.system_catalog AS
+SELECT s.slug, s.name, s.kind, s.owner, s.repo, s.description,
+       coalesce((SELECT json_agg(json_build_object('agent', i.agent, 'label', i.label, 'host', a.host) ORDER BY i.agent)
+                 FROM board.system_instance i JOIN board.agent a ON a.handle = i.agent WHERE i.system = s.slug), '[]') AS instances,
+       coalesce((SELECT json_agg(json_build_object('id', t.id, 'path', t.path, 'slug', t.slug, 'title', t.title, 'role', ps.role)
+                                 ORDER BY t.path)
+                 FROM board.project_system ps JOIN board.task t ON t.id = ps.project_id WHERE ps.system = s.slug), '[]') AS projects,
+       (SELECT count(*) FROM board.task x WHERE x.system = s.slug AND x.status NOT IN ('done', 'cancelled')) AS open_tasks
+FROM board.system s;
+
+CREATE OR REPLACE VIEW api.clients AS
+SELECT c.slug, c.name, c.kind, c.notes,
+       coalesce((SELECT json_agg(json_build_object('id', t.id, 'path', t.path, 'title', t.title, 'for_client', pc.for_client))
+                 FROM board.project_client pc JOIN board.task t ON t.id = pc.project_id WHERE pc.client = c.slug), '[]') AS projects
+FROM board.client c;
+
 CREATE OR REPLACE VIEW api.tasks AS
 SELECT t.id, t.parent_id, t.title, t.description, t.status, t.assignee, t.created_by, t.check_every::text AS check_every,
        t.due_at, t.needs_human, t.human_reason, t.position, t.created_at, t.updated_at, t.status_changed_at, t.activity_at,
@@ -1271,7 +1453,11 @@ SELECT t.id, t.parent_id, t.title, t.description, t.status, t.assignee, t.create
        coalesce((SELECT array_agg(x.thread_id ORDER BY x.thread_id) FROM board.task_thread x WHERE x.task_id = t.id), '{}') AS threads,
        (SELECT count(*) FROM board.task_note n WHERE n.task_id = t.id) AS notes,
        (SELECT n.body FROM board.task_note n WHERE n.task_id = t.id AND n.body <> '' ORDER BY n.id DESC LIMIT 1) AS last_note,
-       t.path
+       t.path, t.umbrella,
+       t.kind, t.slug, t.url, t.system,
+       board.task_project(t.id) AS project_id,
+       (SELECT i.system FROM board.system_instance i WHERE i.agent = t.assignee ORDER BY i.system LIMIT 1) AS assignee_system,
+       t.human_level
 FROM board.task t;
 
 CREATE OR REPLACE VIEW api.task_notes AS
@@ -1430,7 +1616,7 @@ BEGIN
     END IF;
     IF n.title IS DISTINCT FROM o.title THEN changes := changes || format('title: "%s"', n.title); END IF;
     IF n.description IS DISTINCT FROM o.description THEN changes := changes || 'description edited'::text; END IF;
-    IF n.parent_id IS DISTINCT FROM o.parent_id THEN changes := changes || format('parent: %s', coalesce('#' || n.parent_id, '-')); END IF;
+    IF n.parent_id IS DISTINCT FROM o.parent_id THEN changes := changes || format('parent: %s', coalesce(board.task_ref(n.parent_id), '-')); END IF;
     IF n.check_every IS DISTINCT FROM o.check_every THEN changes := changes || format('check-in every %s', n.check_every); END IF;
     IF n.due_at IS DISTINCT FROM o.due_at THEN changes := changes || format('due: %s', coalesce(board.fmt_ts(n.due_at), '-')); END IF;
     IF n.needs_human IS DISTINCT FROM o.needs_human OR n.human_reason IS DISTINCT FROM o.human_reason THEN
@@ -1526,7 +1712,12 @@ BEGIN
     FROM api.task_threads x WHERE x.task_id = t.id;
     SELECT string_agg(format('  %s %s: %s', board.fmt_ts(n.created_at), n.author,
                              concat_ws(' | ', '[' || n.change || ']', nullif(n.body, ''))), E'\n' ORDER BY n.id) INTO log
-    FROM (SELECT * FROM board.task_note n WHERE n.task_id = t.id ORDER BY n.id DESC LIMIT 15) n;
+    -- the latest 15, plus the latest 10 by anyone but the PM: its own check-in notes must not push the
+    -- owners' reports (and the human's answers) out of view
+    FROM board.task_note n
+    WHERE n.id IN (SELECT x.id FROM board.task_note x WHERE x.task_id = t.id ORDER BY x.id DESC LIMIT 15)
+       OR n.id IN (SELECT x.id FROM board.task_note x WHERE x.task_id = t.id AND x.author <> (SELECT pm FROM board.policy)
+                   ORDER BY x.id DESC LIMIT 10);
     RETURN concat_ws(E'\n',
         board.fmt_task(t),
         CASE WHEN path IS NOT NULL THEN 'Under:    ' || path END,
@@ -1535,7 +1726,7 @@ BEGIN
         CASE WHEN t.description <> '' THEN E'\n' || t.description END,
         E'\nSubtasks:', coalesce(subs, '  (none)'),
         E'\nThreads:', coalesce(ths, '  (none)'),
-        E'\nLog (latest 15):', coalesce(log, '  (empty)'),
+        E'\nLog (latest 15, plus the 10 latest not by the PM):', coalesce(log, '  (empty)'),
         E'\n-- note: board task note ' || t.id || ' -m "..." | status: board task update ' || t.id
             || ' --status todo|doing|blocked|review|done | subtask: board task new --parent ' || t.id || ' --title "..." --assignee H');
 END $$;
@@ -1637,7 +1828,12 @@ BEGIN
                       v.format, v.saved_by, board.fmt_ts(v.saved_at), v.body);
     END IF;
     RETURN format(E'== doc:%s v%s "%s" [%s] by %s, updated %s by %s\n\n%s', d.slug, d.version, d.title, d.format,
-                  d.created_by, board.fmt_ts(d.updated_at), d.updated_by, d.body);
+                  d.created_by, board.fmt_ts(d.updated_at), d.updated_by, d.body)
+        || coalesce(format(E'\n\n== open comments (reply or resolve at %s/docs/%s#comments)\n',
+                           coalesce(nullif(current_setting('board.web_url', true), ''), 'https://board.webgma.co.il'), d.slug) || (
+            SELECT string_agg(format(E'#%s %s %s (on v%s) on "%s":\n    %s', c.id, c.author, board.fmt_ts(c.created_at), c.version,
+                                     left(c.quote, 160), replace(c.body, E'\n', E'\n    ')), E'\n' ORDER BY c.created_at)
+            FROM doc_comment c WHERE c.doc_id = d.id AND c.resolved_at IS NULL), '');
 END $$;
 
 CREATE OR REPLACE FUNCTION api.doc_list() RETURNS api."text/plain"
@@ -1646,6 +1842,317 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = board, public AS $$
                                       d.updated_by, d.title), E'\n' ORDER BY d.updated_at DESC), '(no docs yet)')
     FROM board.doc d WHERE board.require_me() IS NOT NULL
 $$;
+
+-- Comments on a selected passage of a doc (guy, 11-13). Anchored by the quoted text plus a little context
+-- before/after it (prefix/suffix), so they re-attach to the passage in later versions while it still exists.
+-- Each new comment notifies the doc's author (and its last editor) with a direct board message.
+CREATE TABLE IF NOT EXISTS board.doc_comment (
+    id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    doc_id      bigint NOT NULL REFERENCES board.doc ON DELETE CASCADE,
+    version     integer NOT NULL,
+    quote       text NOT NULL CHECK (length(quote) BETWEEN 1 AND 2000),
+    prefix      text NOT NULL DEFAULT '' CHECK (length(prefix) <= 200),
+    suffix      text NOT NULL DEFAULT '' CHECK (length(suffix) <= 200),
+    body        text NOT NULL CHECK (length(body) BETWEEN 1 AND 4000),
+    author      text NOT NULL REFERENCES board.agent,
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    message_id  bigint REFERENCES board.message ON DELETE SET NULL,
+    resolved_at timestamptz,
+    resolved_by text REFERENCES board.agent
+);
+CREATE INDEX IF NOT EXISTS doc_comment_doc ON board.doc_comment (doc_id, created_at);
+
+CREATE OR REPLACE VIEW api.doc_comments AS
+SELECT c.id, d.slug, c.version, c.quote, c.prefix, c.suffix, c.body, c.author, c.created_at, c.message_id,
+       c.resolved_at, c.resolved_by
+FROM board.doc_comment c JOIN board.doc d ON d.id = c.doc_id;
+
+CREATE OR REPLACE FUNCTION api.doc_comment(slug text, quote text, body text, version integer DEFAULT NULL,
+                                           prefix text DEFAULT '', suffix text DEFAULT '')
+RETURNS json LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = board, public AS $$
+DECLARE me text := board.require_me(); d board.doc; c board.doc_comment; rcpt text; msg json; web text;
+        q text := btrim(regexp_replace(coalesce(doc_comment.quote, ''), '\s+', ' ', 'g'));
+BEGIN
+    IF q = '' THEN RAISE EXCEPTION 'quote (the selected passage) is required'; END IF;
+    IF coalesce(btrim(doc_comment.body), '') = '' THEN RAISE EXCEPTION 'comment text is required'; END IF;
+    SELECT * INTO d FROM doc x WHERE x.slug = lower(btrim(doc_comment.slug));
+    IF NOT FOUND THEN RAISE EXCEPTION 'no doc "%"', doc_comment.slug; END IF;
+    INSERT INTO doc_comment (doc_id, version, quote, prefix, suffix, body, author)
+    VALUES (d.id, coalesce(doc_comment.version, d.version), left(q, 2000),
+            right(coalesce(doc_comment.prefix, ''), 200), left(coalesce(doc_comment.suffix, ''), 200),
+            btrim(doc_comment.body), me)
+    RETURNING * INTO c;
+    -- notify the author and the last editor (not the commenter)
+    SELECT string_agg(DISTINCT h, ',') INTO rcpt FROM unnest(ARRAY[d.created_by, d.updated_by]) h
+    JOIN agent a ON a.handle = h WHERE h <> me AND a.active;
+    IF rcpt IS NOT NULL THEN
+        web := coalesce(nullif(current_setting('board.web_url', true), ''), 'https://board.webgma.co.il');
+        msg := api.post(
+            format('Comment on doc:%s from %s', d.slug, me),
+            format(E'%s commented on [doc:%s](%s/docs/%s#comment-%s) (v%s), on this passage:\n\n> %s\n\n%s\n\n'
+                   'Act on it in the doc if needed (board doc save %s ...). A reply here reaches %s.',
+                   me, d.slug, web, d.slug, c.id, c.version, left(q, 600), btrim(doc_comment.body), d.slug, me),
+            rcpt, 'doc-comment');
+        UPDATE doc_comment x SET message_id = (msg->>'id')::bigint WHERE x.id = c.id;
+    END IF;
+    RETURN json_build_object('id', c.id, 'notified', rcpt, 'message_id', (msg->>'id')::bigint);
+END $$;
+
+-- ---------------------------------------------------------------- API: code reviews
+-- Code reviews (guy, 11-13): an agent commits its pending work to a branch (one per feature, or an ongoing
+-- 'dev'), pushes it, and submits the diff here (`board review submit`). Each push of the branch is a new
+-- revision. guy reads and comments on the diff in the web UI (select -> comment, as on docs); every comment
+-- and the decision go to the agent as a board message. Approve -> the agent merges into the base branch and
+-- pushes, then `board review merged ID`. Changes requested -> the agent fixes, pushes, and re-submits.
+CREATE TABLE IF NOT EXISTS board.review (
+    id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    agent         text NOT NULL REFERENCES board.agent,
+    repo          text NOT NULL CHECK (length(repo) BETWEEN 1 AND 200),
+    branch        text NOT NULL CHECK (length(branch) BETWEEN 1 AND 200),
+    base          text NOT NULL DEFAULT 'master' CHECK (length(base) BETWEEN 1 AND 200),
+    title         text NOT NULL CHECK (length(title) BETWEEN 1 AND 300),
+    description   text NOT NULL DEFAULT '' CHECK (length(description) <= 20000),
+    compare_url   text,
+    task_id       bigint REFERENCES board.task ON DELETE SET NULL,
+    status        text NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'approved', 'changes', 'merged', 'closed')),
+    decided_by    text REFERENCES board.agent,
+    decided_at    timestamptz,
+    decision_note text,
+    merged_sha    text,
+    created_at    timestamptz NOT NULL DEFAULT now(),
+    updated_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS review_live ON board.review (agent, repo, branch) WHERE status IN ('open', 'approved', 'changes');
+CREATE TABLE IF NOT EXISTS board.review_rev (
+    review_id  bigint NOT NULL REFERENCES board.review ON DELETE CASCADE,
+    rev        integer NOT NULL,
+    head_sha   text,
+    base_sha   text,
+    diff       text NOT NULL CHECK (length(diff) <= 5000000),
+    files      integer NOT NULL DEFAULT 0,
+    adds       integer NOT NULL DEFAULT 0,
+    dels       integer NOT NULL DEFAULT 0,
+    note       text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (review_id, rev)
+);
+CREATE TABLE IF NOT EXISTS board.review_comment (
+    id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    review_id   bigint NOT NULL REFERENCES board.review ON DELETE CASCADE,
+    rev         integer NOT NULL,
+    path        text NOT NULL DEFAULT '',
+    side        text NOT NULL DEFAULT 'new' CHECK (side IN ('old', 'new')),
+    line        integer,
+    quote       text NOT NULL DEFAULT '' CHECK (length(quote) <= 4000),
+    body        text NOT NULL CHECK (length(body) BETWEEN 1 AND 8000),
+    author      text NOT NULL REFERENCES board.agent,
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    message_id  bigint REFERENCES board.message ON DELETE SET NULL,
+    resolved_at timestamptz,
+    resolved_by text REFERENCES board.agent
+);
+CREATE INDEX IF NOT EXISTS review_comment_review ON board.review_comment (review_id, created_at);
+
+CREATE OR REPLACE VIEW api.reviews AS
+SELECT r.id, r.agent, r.repo, r.branch, r.base, r.title, r.description, r.compare_url, r.task_id, t.path AS task_path,
+       r.status, r.decided_by, r.decided_at, r.decision_note, r.merged_sha, r.created_at, r.updated_at,
+       v.rev, v.head_sha, v.files, v.adds, v.dels, v.created_at AS rev_at,
+       (SELECT count(*) FROM board.review_comment c WHERE c.review_id = r.id AND c.resolved_at IS NULL) AS open_comments
+FROM board.review r
+LEFT JOIN board.task t ON t.id = r.task_id
+LEFT JOIN LATERAL (SELECT * FROM board.review_rev x WHERE x.review_id = r.id ORDER BY x.rev DESC LIMIT 1) v ON true;
+CREATE OR REPLACE VIEW api.review_revs AS
+SELECT review_id, rev, head_sha, base_sha, diff, files, adds, dels, note, created_at FROM board.review_rev;
+CREATE OR REPLACE VIEW api.review_comments AS
+SELECT id, review_id, rev, path, side, line, quote, body, author, created_at, message_id, resolved_at, resolved_by
+FROM board.review_comment;
+
+CREATE OR REPLACE FUNCTION board.review_url(id bigint) RETURNS text LANGUAGE sql STABLE AS $$
+    SELECT coalesce(nullif(current_setting('board.web_url', true), ''), 'https://board.webgma.co.il') || '/reviews/' || id
+$$;
+
+-- Submit (or re-submit) a branch for review. diff: `git diff --no-color BASE...BRANCH`. Re-submitting the same
+-- repo+branch while its review is live adds a revision and re-opens it. Returns the review URL.
+CREATE OR REPLACE FUNCTION api.review_submit(repo text, branch text, diff text, title text DEFAULT NULL,
+    base text DEFAULT 'master', description text DEFAULT NULL, head_sha text DEFAULT NULL, base_sha text DEFAULT NULL,
+    compare_url text DEFAULT NULL, task text DEFAULT NULL, note text DEFAULT NULL)
+RETURNS api."text/plain" LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = board, public AS $$
+DECLARE me text := board.require_me(); r board.review; n integer; tid bigint;
+        f integer; a integer; d integer; fresh boolean := false;
+BEGIN
+    IF coalesce(btrim(review_submit.diff), '') = '' THEN
+        RAISE EXCEPTION 'empty diff: nothing differs between % and % (commit and push first)', coalesce(review_submit.base, 'master'), review_submit.branch;
+    END IF;
+    IF review_submit.task IS NOT NULL AND btrim(review_submit.task) <> '' THEN tid := api.task_id(review_submit.task); END IF;
+    SELECT count(*) FILTER (WHERE l ~ '^diff --git '), count(*) FILTER (WHERE l ~ '^\+' AND l !~ '^\+\+\+ '),
+           count(*) FILTER (WHERE l ~ '^-' AND l !~ '^--- ')
+      INTO f, a, d FROM regexp_split_to_table(review_submit.diff, E'\n') l;
+    SELECT * INTO r FROM review x WHERE x.agent = me AND x.repo = btrim(review_submit.repo) AND x.branch = btrim(review_submit.branch)
+       AND x.status IN ('open', 'approved', 'changes') FOR UPDATE;
+    IF NOT FOUND THEN
+        INSERT INTO review (agent, repo, branch, base, title, description, compare_url, task_id)
+        VALUES (me, btrim(review_submit.repo), btrim(review_submit.branch), coalesce(nullif(btrim(review_submit.base), ''), 'master'),
+                left(coalesce(nullif(btrim(review_submit.title), ''), btrim(review_submit.repo) || ': ' || btrim(review_submit.branch)), 300),
+                coalesce(review_submit.description, ''), nullif(btrim(review_submit.compare_url), ''), tid)
+        RETURNING * INTO r;
+        fresh := true;
+    ELSE
+        UPDATE review x SET status = 'open', updated_at = now(), decided_by = NULL, decided_at = NULL, decision_note = NULL,
+               title = coalesce(nullif(btrim(review_submit.title), ''), x.title),
+               description = coalesce(review_submit.description, x.description),
+               compare_url = coalesce(nullif(btrim(review_submit.compare_url), ''), x.compare_url),
+               task_id = coalesce(tid, x.task_id)
+        WHERE x.id = r.id RETURNING * INTO r;
+    END IF;
+    SELECT coalesce(max(v.rev), 0) + 1 INTO n FROM review_rev v WHERE v.review_id = r.id;
+    INSERT INTO review_rev (review_id, rev, head_sha, base_sha, diff, files, adds, dels, note)
+    VALUES (r.id, n, nullif(btrim(review_submit.head_sha), ''), nullif(btrim(review_submit.base_sha), ''), review_submit.diff, f, a, d,
+            nullif(btrim(review_submit.note), ''));
+    RETURN format('review #%s %s (rev %s: %s files, +%s -%s) -- %s', r.id, CASE WHEN fresh THEN 'created' ELSE 'updated' END,
+                  n, f, a, d, board.review_url(r.id));
+END $$;
+
+-- Comment on a line (path/side/line) or a selected passage (quote) of a revision. Notifies the review's agent,
+-- or, when the agent itself comments, whoever decided (nobody before a decision).
+CREATE OR REPLACE FUNCTION api.review_comment(id bigint, body text, rev integer DEFAULT NULL, path text DEFAULT '',
+    side text DEFAULT 'new', line integer DEFAULT NULL, quote text DEFAULT '')
+RETURNS json LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = board, public AS $$
+DECLARE me text := board.require_me(); r board.review; c board.review_comment; rcpt text; msg json; q text;
+BEGIN
+    IF coalesce(btrim(review_comment.body), '') = '' THEN RAISE EXCEPTION 'comment text is required'; END IF;
+    SELECT * INTO r FROM review x WHERE x.id = review_comment.id;
+    IF NOT FOUND THEN RAISE EXCEPTION 'no review #%', review_comment.id; END IF;
+    q := left(btrim(coalesce(review_comment.quote, '')), 4000);
+    INSERT INTO review_comment (review_id, rev, path, side, line, quote, body, author)
+    VALUES (r.id, coalesce(review_comment.rev, (SELECT max(v.rev) FROM review_rev v WHERE v.review_id = r.id)),
+            coalesce(review_comment.path, ''), coalesce(nullif(review_comment.side, ''), 'new'), review_comment.line, q,
+            btrim(review_comment.body), me)
+    RETURNING * INTO c;
+    IF me <> r.agent THEN rcpt := r.agent;
+    ELSE rcpt := r.decided_by;  -- the agent's own replies reach a decider only; guy sees the rest in the UI/digest
+    END IF;
+    IF rcpt IS NOT NULL THEN
+        msg := api.post(format('Review #%s comment from %s: %s', r.id, me, left(r.title, 120)),
+            format(E'%s commented on [review #%s](%s#c%s) (%s %s, rev %s)%s:\n\n%s%s\n\n%s',
+                   me, r.id, board.review_url(r.id), c.id, r.repo, r.branch, c.rev,
+                   CASE WHEN c.path <> '' THEN format(' at `%s`%s', c.path, coalesce(format(' %s line %s', c.side, c.line), '')) ELSE '' END,
+                   CASE WHEN q <> '' THEN '> ' || replace(left(q, 800), E'\n', E'\n> ') || E'\n\n' ELSE '' END,
+                   btrim(review_comment.body),
+                   CASE WHEN me <> r.agent THEN 'Address it on the branch, push, and re-submit (board review submit ...). A reply here reaches ' || me || '.' ELSE '' END),
+            rcpt, 'review');
+        UPDATE review_comment x SET message_id = (msg->>'id')::bigint WHERE x.id = c.id;
+    END IF;
+    UPDATE review x SET updated_at = now() WHERE x.id = r.id;
+    RETURN json_build_object('id', c.id, 'notified', rcpt);
+END $$;
+
+CREATE OR REPLACE FUNCTION api.review_comment_resolve(id bigint, resolved boolean DEFAULT true)
+RETURNS void LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = board, public AS $$
+DECLARE me text := board.require_me(); c board.review_comment; r board.review;
+BEGIN
+    SELECT * INTO c FROM review_comment x WHERE x.id = review_comment_resolve.id;
+    IF NOT FOUND THEN RAISE EXCEPTION 'no review comment #%', review_comment_resolve.id; END IF;
+    SELECT * INTO r FROM review x WHERE x.id = c.review_id;
+    IF me NOT IN (c.author, r.agent) AND NOT board.is_admin() THEN
+        RAISE EXCEPTION 'only the commenter, the review''s agent or an admin can resolve comment #%', c.id USING ERRCODE = '42501';
+    END IF;
+    UPDATE review_comment x SET resolved_at = CASE WHEN resolved THEN now() END, resolved_by = CASE WHEN resolved THEN me END
+    WHERE x.id = c.id;
+END $$;
+
+-- guy's decision: approve -> the agent merges + pushes; changes -> the agent fixes and re-submits. Admins only.
+CREATE OR REPLACE FUNCTION api.review_decide(id bigint, decision text, note text DEFAULT NULL)
+RETURNS json LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = board, public AS $$
+DECLARE me text := board.require_me(); r board.review; dec text := lower(btrim(review_decide.decision)); open_c bigint; msg json;
+BEGIN
+    IF NOT board.is_admin() THEN RAISE EXCEPTION 'only an admin decides a review' USING ERRCODE = '42501'; END IF;
+    IF dec NOT IN ('approve', 'changes') THEN RAISE EXCEPTION 'decision must be approve or changes, not "%"', review_decide.decision; END IF;
+    IF dec = 'changes' AND coalesce(btrim(review_decide.note), '') = ''
+       AND NOT EXISTS (SELECT 1 FROM review_comment c WHERE c.review_id = review_decide.id AND c.resolved_at IS NULL) THEN
+        RAISE EXCEPTION 'say what to change: add a reason or a comment';
+    END IF;
+    SELECT * INTO r FROM review x WHERE x.id = review_decide.id FOR UPDATE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'no review #%', review_decide.id; END IF;
+    IF r.status IN ('merged', 'closed') THEN RAISE EXCEPTION 'review #% is already %', r.id, r.status; END IF;
+    UPDATE review x SET status = CASE WHEN dec = 'approve' THEN 'approved' ELSE 'changes' END, decided_by = me, decided_at = now(),
+           decision_note = nullif(btrim(review_decide.note), ''), updated_at = now()
+    WHERE x.id = r.id RETURNING * INTO r;
+    SELECT count(*) INTO open_c FROM review_comment c WHERE c.review_id = r.id AND c.resolved_at IS NULL;
+    msg := api.post(
+        format('Review #%s %s: %s', r.id, CASE WHEN dec = 'approve' THEN 'APPROVED' ELSE 'changes requested' END, left(r.title, 120)),
+        CASE WHEN dec = 'approve' THEN
+            format(E'%s approved [review #%s](%s) (%s, branch %s -> %s).%s\n\nMerge %s into %s, push %s, then run: board review merged %s --sha <merge commit>%s',
+                   me, r.id, board.review_url(r.id), r.repo, r.branch, r.base,
+                   coalesce(E'\n\n' || nullif(btrim(review_decide.note), ''), ''),
+                   r.branch, r.base, r.base, r.id,
+                   CASE WHEN open_c > 0 THEN format(E'\n(%s open comment(s) on it: read them first; apply small ones before merging.)', open_c) ELSE '' END)
+        ELSE
+            format(E'%s requested changes on [review #%s](%s) (%s, branch %s).%s\n\n%s open comment(s): see them with board review %s. Fix on the branch, push, and re-submit: board review submit ... (same branch = a new revision of this review).',
+                   me, r.id, board.review_url(r.id), r.repo, r.branch,
+                   coalesce(E'\n\nReason: ' || nullif(btrim(review_decide.note), ''), ''), open_c, r.id)
+        END,
+        r.agent, 'review');
+    RETURN json_build_object('id', r.id, 'status', r.status, 'message_id', msg->>'id');
+END $$;
+
+-- the agent reports the merge (after an approval), or closes a review it abandons
+CREATE OR REPLACE FUNCTION api.review_done(id bigint, status text DEFAULT 'merged', sha text DEFAULT NULL, note text DEFAULT NULL)
+RETURNS api."text/plain" LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = board, public AS $$
+DECLARE me text := board.require_me(); r board.review; st text := lower(btrim(review_done.status));
+BEGIN
+    SELECT * INTO r FROM review x WHERE x.id = review_done.id FOR UPDATE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'no review #%', review_done.id; END IF;
+    IF me <> r.agent AND NOT board.is_admin() THEN RAISE EXCEPTION 'review #% is %''s', r.id, r.agent USING ERRCODE = '42501'; END IF;
+    IF st NOT IN ('merged', 'closed') THEN RAISE EXCEPTION 'status must be merged or closed'; END IF;
+    IF st = 'merged' AND r.status <> 'approved' THEN
+        RAISE EXCEPTION 'review #% is %, not approved: merge only after guy approves it', r.id, r.status;
+    END IF;
+    UPDATE review x SET status = st, merged_sha = coalesce(nullif(btrim(review_done.sha), ''), x.merged_sha), updated_at = now(),
+           decision_note = coalesce(x.decision_note || E'\n', '') || coalesce(nullif(btrim(review_done.note), ''), '')
+    WHERE x.id = r.id;
+    RETURN format('review #%s %s -- %s', r.id, st, board.review_url(r.id));
+END $$;
+
+-- text for agents: one review (status, decision, open comments), or the list of yours
+CREATE OR REPLACE FUNCTION api.review_text(id bigint DEFAULT NULL, mine boolean DEFAULT true, include_closed boolean DEFAULT false)
+RETURNS api."text/plain" LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = board, public AS $$
+DECLARE me text := board.require_me(); r api.reviews; out text;
+BEGIN
+    IF review_text.id IS NULL THEN
+        RETURN coalesce((SELECT string_agg(format('#%s [%s] %s  %s:%s -> %s  rev %s (+%s -%s), %s open comment(s)  %s',
+                        x.id, x.status, x.agent, x.repo, x.branch, x.base, x.rev, x.adds, x.dels, x.open_comments, board.review_url(x.id)),
+                        E'\n' ORDER BY x.updated_at DESC)
+            FROM api.reviews x WHERE (NOT mine OR x.agent = me) AND (include_closed OR x.status NOT IN ('merged', 'closed'))),
+            '(no reviews)');
+    END IF;
+    SELECT * INTO r FROM api.reviews x WHERE x.id = review_text.id;
+    IF NOT FOUND THEN RAISE EXCEPTION 'no review #%', review_text.id; END IF;
+    out := format(E'== review #%s [%s] "%s" by %s\n%s branch %s -> %s, rev %s (%s, +%s -%s) -- %s%s%s',
+                  r.id, r.status, r.title, r.agent, r.repo, r.branch, r.base, r.rev, coalesce(left(r.head_sha, 12), '?'), r.adds, r.dels,
+                  board.review_url(r.id),
+                  CASE WHEN r.decided_at IS NOT NULL THEN format(E'\ndecision: %s by %s %s', r.status, r.decided_by, board.fmt_ts(r.decided_at)) ELSE '' END,
+                  coalesce(E'\nnote: ' || r.decision_note, ''));
+    RETURN out || coalesce(E'\n\n== open comments\n' || (
+        SELECT string_agg(format(E'#%s %s %s (rev %s)%s%s:\n    %s', c.id, c.author, board.fmt_ts(c.created_at), c.rev,
+                                 CASE WHEN c.path <> '' THEN ' ' || c.path || coalesce(format(' %s:%s', c.side, c.line), '') ELSE '' END,
+                                 CASE WHEN c.quote <> '' THEN format(' on "%s"', left(replace(c.quote, E'\n', ' '), 160)) ELSE '' END,
+                                 replace(c.body, E'\n', E'\n    ')), E'\n' ORDER BY c.created_at)
+        FROM review_comment c WHERE c.review_id = r.id AND c.resolved_at IS NULL), '');
+END $$;
+
+CREATE OR REPLACE FUNCTION api.doc_comment_resolve(id bigint, resolved boolean DEFAULT true)
+RETURNS void LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = board, public AS $$
+DECLARE me text := board.require_me(); c board.doc_comment;
+BEGIN
+    SELECT * INTO c FROM doc_comment x WHERE x.id = doc_comment_resolve.id;
+    IF NOT FOUND THEN RAISE EXCEPTION 'no comment #%', doc_comment_resolve.id; END IF;
+    IF me <> c.author AND me <> (SELECT d.created_by FROM doc d WHERE d.id = c.doc_id)
+       AND NOT (me = (SELECT pm FROM policy) OR (SELECT is_admin FROM agent WHERE handle = me)) THEN
+        RAISE EXCEPTION 'only the commenter, the doc author or an admin can resolve comment #%', c.id USING ERRCODE = '42501';
+    END IF;
+    UPDATE doc_comment x SET resolved_at = CASE WHEN resolved THEN now() END, resolved_by = CASE WHEN resolved THEN me END
+    WHERE x.id = c.id;
+END $$;
 
 CREATE OR REPLACE FUNCTION board.expire_logins() RETURNS void LANGUAGE sql VOLATILE AS $$
     UPDATE board.login_request SET state = 'expired', code = NULL, updated_at = now(),
@@ -1790,6 +2297,20 @@ SELECT format('session:%s:%s:%s', a.handle, a.session_state, extract(epoch FROM 
 FROM board.agent a
 WHERE a.kind = 'agent' AND a.active AND a.session_state IN ('logged_out', 'needs_input', 'no_claude')
 UNION ALL
+-- watchers silent 10 min, one item per host (a host that goes down takes all its agents with it)
+SELECT format('silent:%s:%s', w.host, md5(string_agg(w.handle || extract(epoch FROM w.seen)::bigint, ',' ORDER BY w.handle))),
+       'silent:' || w.host, NULL, max(w.seen) + interval '10 minutes',
+       format('%s: %s not answering', w.host, CASE WHEN count(*) = 1 THEN min(w.handle) || '''s watcher'
+                                                   ELSE count(*) || ' agents'' watchers' END),
+       format('Silent since %s UTC: %s. They get no board notifications until their tmux sessions run again.',
+              to_char(min(w.seen) AT TIME ZONE 'UTC', 'MM-DD HH24:MI'), string_agg(w.handle, ', ' ORDER BY w.handle)),
+       '/agents'
+FROM (SELECT a.handle, coalesce(a.host, '?') AS host, coalesce(a.last_seen_at, a.created_at) AS seen
+      FROM board.agent a
+      WHERE a.kind = 'agent' AND a.active AND NOT a.offline_ok
+        AND coalesce(a.last_seen_at, '-infinity') < now() - interval '10 minutes') w
+GROUP BY w.host
+UNION ALL
 SELECT format('login:%s:%s:%s', l.id, l.state, md5(coalesce(l.url, ''))), 'login:' || l.handle, l.requested_by, l.updated_at,
        format('%s: login link %s', l.handle, CASE l.state WHEN 'url_ready' THEN 'ready' ELSE 'rejected the code, new link ready' END),
        'Open the link, authorize, and paste the code', '/agents'
@@ -1851,7 +2372,7 @@ BEGIN
     IF push_subscribe.endpoint !~ '^https://' THEN RAISE EXCEPTION 'endpoint must be an https URL'; END IF;
     INSERT INTO board.push_subscription AS s (endpoint, handle, p256dh, auth, user_agent, test_requested_at)
     VALUES (push_subscribe.endpoint, me, push_subscribe.p256dh, push_subscribe.auth, left(push_subscribe.user_agent, 300), now())
-    ON CONFLICT (endpoint) DO UPDATE SET handle = me, p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth,
+    ON CONFLICT ON CONSTRAINT push_subscription_pkey DO UPDATE SET handle = me, p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth,
         user_agent = EXCLUDED.user_agent, test_requested_at = now(), last_error = NULL;
     RETURN json_build_object('subscribed', true, 'worker', EXISTS (SELECT 1 FROM board.push_config));
 END $$;
@@ -1885,6 +2406,104 @@ BEGIN
     RETURN (SELECT row_to_json(x) FROM api.agents x WHERE x.handle = set_active.handle);
 END $$;
 
+-- an agent that is fine to be offline: its silent watcher raises no warning, push or sweep line
+CREATE OR REPLACE FUNCTION api.set_offline_ok(handle text, offline_ok boolean) RETURNS json
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = board, public AS $$
+BEGIN
+    PERFORM board.require_admin();
+    UPDATE board.agent a SET offline_ok = set_offline_ok.offline_ok, updated_at = now() WHERE a.handle = set_offline_ok.handle;
+    RETURN (SELECT row_to_json(x) FROM api.agents x WHERE x.handle = set_offline_ok.handle);
+END $$;
+
+-- the catalog of systems, projects and clients is kept by an admin or the PM agent (board.policy.pm)
+CREATE OR REPLACE FUNCTION board.require_curator() RETURNS text
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = board, public AS $$
+DECLARE h text := board.require_me();
+BEGIN
+    IF NOT (board.is_admin() OR h = (SELECT pm FROM board.policy)) THEN
+        RAISE EXCEPTION 'admins and the PM agent only' USING ERRCODE = '42501';
+    END IF;
+    RETURN h;
+END $$;
+
+-- a task's kind/slug/url/system; NULL leaves a field as is, '' clears it
+CREATE OR REPLACE FUNCTION api.task_classify(id bigint, kind text DEFAULT NULL, slug text DEFAULT NULL,
+                                             url text DEFAULT NULL, system text DEFAULT NULL) RETURNS json
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = board, public AS $$
+BEGIN
+    PERFORM board.require_curator();
+    UPDATE board.task t SET kind = coalesce(nullif(task_classify.kind, ''), t.kind),
+                            slug = CASE WHEN task_classify.slug IS NULL THEN t.slug ELSE nullif(task_classify.slug, '') END,
+                            url = CASE WHEN task_classify.url IS NULL THEN t.url ELSE nullif(task_classify.url, '') END,
+                            system = CASE WHEN task_classify.system IS NULL THEN t.system ELSE nullif(task_classify.system, '') END,
+                            updated_at = now()
+    WHERE t.id = task_classify.id;
+    IF NOT FOUND THEN RAISE EXCEPTION 'no task %', task_classify.id; END IF;
+    RETURN (SELECT row_to_json(x) FROM api.tasks x WHERE x.id = task_classify.id);
+END $$;
+
+CREATE OR REPLACE FUNCTION api.system_save(slug text, name text, kind text DEFAULT 'service', owner text DEFAULT NULL,
+                                           repo text DEFAULT NULL, description text DEFAULT NULL) RETURNS json
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = board, public AS $$
+BEGIN
+    PERFORM board.require_curator();
+    INSERT INTO board.system AS s (slug, name, kind, owner, repo, description)
+    VALUES (system_save.slug, system_save.name, system_save.kind, system_save.owner, system_save.repo, system_save.description)
+    ON CONFLICT ON CONSTRAINT system_pkey DO UPDATE SET name = EXCLUDED.name, kind = EXCLUDED.kind, owner = EXCLUDED.owner,
+        repo = EXCLUDED.repo, description = EXCLUDED.description;
+    RETURN (SELECT row_to_json(x) FROM api.system_catalog x WHERE x.slug = system_save.slug);
+END $$;
+
+-- link (or with remove, unlink) a system to the agent running an instance of it
+CREATE OR REPLACE FUNCTION api.system_instance(system text, agent text, label text DEFAULT NULL, remove boolean DEFAULT false)
+RETURNS json LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = board, public AS $$
+BEGIN
+    PERFORM board.require_curator();
+    IF remove THEN
+        DELETE FROM board.system_instance i WHERE i.system = system_instance.system AND i.agent = system_instance.agent;
+    ELSE
+        INSERT INTO board.system_instance AS i (system, agent, label) VALUES (system_instance.system, system_instance.agent, system_instance.label)
+        ON CONFLICT ON CONSTRAINT system_instance_pkey DO UPDATE SET label = EXCLUDED.label;
+    END IF;
+    RETURN (SELECT row_to_json(x) FROM api.system_catalog x WHERE x.slug = system_instance.system);
+END $$;
+
+CREATE OR REPLACE FUNCTION api.project_system(project_id bigint, system text, role text DEFAULT 'uses', remove boolean DEFAULT false)
+RETURNS json LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = board, public AS $$
+BEGIN
+    PERFORM board.require_curator();
+    IF remove THEN
+        DELETE FROM board.project_system ps WHERE ps.project_id = project_system.project_id AND ps.system = project_system.system;
+    ELSE
+        INSERT INTO board.project_system AS ps (project_id, system, role) VALUES (project_system.project_id, project_system.system, project_system.role)
+        ON CONFLICT ON CONSTRAINT project_system_pkey DO UPDATE SET role = EXCLUDED.role;
+    END IF;
+    RETURN (SELECT row_to_json(x) FROM api.projects x WHERE x.id = project_system.project_id);
+END $$;
+
+CREATE OR REPLACE FUNCTION api.client_save(slug text, name text, kind text DEFAULT 'organisation', notes text DEFAULT NULL)
+RETURNS json LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = board, public AS $$
+BEGIN
+    PERFORM board.require_curator();
+    INSERT INTO board.client AS c (slug, name, kind, notes) VALUES (client_save.slug, client_save.name, client_save.kind, client_save.notes)
+    ON CONFLICT ON CONSTRAINT client_pkey DO UPDATE SET name = EXCLUDED.name, kind = EXCLUDED.kind, notes = EXCLUDED.notes;
+    RETURN (SELECT row_to_json(x) FROM api.clients x WHERE x.slug = client_save.slug);
+END $$;
+
+CREATE OR REPLACE FUNCTION api.project_client(project_id bigint, client text, for_client text DEFAULT NULL, remove boolean DEFAULT false)
+RETURNS json LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = board, public AS $$
+BEGIN
+    PERFORM board.require_curator();
+    IF remove THEN
+        DELETE FROM board.project_client pc WHERE pc.project_id = project_client.project_id AND pc.client = project_client.client;
+    ELSE
+        INSERT INTO board.project_client AS pc (project_id, client, for_client)
+        VALUES (project_client.project_id, project_client.client, nullif(project_client.for_client, ''))
+        ON CONFLICT ON CONSTRAINT project_client_pkey DO UPDATE SET for_client = EXCLUDED.for_client;
+    END IF;
+    RETURN (SELECT row_to_json(x) FROM api.projects x WHERE x.id = project_client.project_id);
+END $$;
+
 -- revokes every outstanding token of `handle` and returns a fresh one
 CREATE OR REPLACE FUNCTION api.reissue_token(handle text) RETURNS json
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = board, public AS $$
@@ -1896,11 +2515,201 @@ BEGIN
     RETURN json_build_object('handle', reissue_token.handle, 'token', board.token_for(reissue_token.handle));
 END $$;
 
+-- ---------------------------------------------------------------- Needs you: urgency levels
+-- a task that starts needing the human again starts at "soon" unless its level was set in the same statement
+CREATE OR REPLACE FUNCTION board.task_level_reset() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.needs_human AND NOT OLD.needs_human AND NEW.human_level IS NOT DISTINCT FROM OLD.human_level THEN
+        NEW.human_level := 2;
+    END IF;
+    RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS task_level_reset ON board.task;
+CREATE TRIGGER task_level_reset BEFORE UPDATE OF needs_human ON board.task
+    FOR EACH ROW EXECUTE FUNCTION board.task_level_reset();
+
+-- rate a "needs you": level urgent|soon|whenever (or 1-3), with an optional why for the log. The human, the PM
+-- (board.policy.pm) and the task's assignee may.
+CREATE OR REPLACE FUNCTION api.task_urgency(id bigint, level text, why text DEFAULT NULL) RETURNS api."text/plain"
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = board, public AS $$
+DECLARE me text := board.require_me(); t board.task; l smallint;
+BEGIN
+    l := CASE lower(btrim(level)) WHEN 'urgent' THEN 1 WHEN '1' THEN 1 WHEN 'soon' THEN 2 WHEN '2' THEN 2
+                                  WHEN 'whenever' THEN 3 WHEN '3' THEN 3 END;
+    IF l IS NULL THEN RAISE EXCEPTION 'level must be urgent, soon or whenever'; END IF;
+    SELECT * INTO t FROM board.task x WHERE x.id = task_urgency.id FOR UPDATE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'task % not found', task_urgency.id; END IF;
+    IF NOT (board.is_admin() OR me = t.assignee OR me = (SELECT p.pm FROM board.policy p LIMIT 1)) THEN
+        RAISE EXCEPTION 'only the human, the PM or the assignee rates a task''s urgency';
+    END IF;
+    IF t.human_level <> l THEN
+        UPDATE board.task x SET human_level = l WHERE x.id = t.id;
+        INSERT INTO board.task_note (task_id, author, body, change)
+        VALUES (t.id, me, '', format('urgency: %s -> %s%s', (ARRAY['urgent','soon','whenever'])[t.human_level],
+                                     (ARRAY['urgent','soon','whenever'])[l], coalesce(' (' || left(nullif(why, ''), 300) || ')', '')));
+    END IF;
+    RETURN format('task %s: %s', board.task_ref(t.id), (ARRAY['urgent','soon','whenever'])[l]);
+END $$;
+
+-- ---------------------------------------------------------------- Claude activity (watcher v16+, guy 2026-11-10)
+-- Each watcher reads its Claude session transcripts (~/.claude/projects/**/*.jsonl) incrementally, about hourly,
+-- and pushes one line per ACTIVE MINUTE: when the session wrote to its transcript, or was busy between two
+-- entries (a running tool, a model call; short gaps are filled on the agent's side). With each minute go the
+-- board objects the agent mentioned in it (refs), as written: t:<task id> ("board task note 191", "--task 191"),
+-- p:<task path> ("#119/3", ".../tasks/162/5"), m:<message id> ("/m/1797", "board read 1797"), n:<bare #N>,
+-- and who drove it: u:<name> for a "[from <name>]" prompt (a human via claude-ui), u:board for a watcher line (miko's tip).
+-- A period ("session") of activity = a run of consecutive active minutes; each new prompt in it (u: ref) starts a
+-- segment. Each minute is painted with the targets mentioned last before it in its segment (the first ones, for
+-- the minutes before them; none mentioned: '' = untagged), split
+-- evenly when there are several: that is the load per task. targets: 't<task id>', or 'h<thread id>' for a
+-- thread filed under no task (a thread under tasks counts for its most specific one).
+CREATE TABLE IF NOT EXISTS board.activity_minute (
+    handle    text NOT NULL REFERENCES board.agent (handle) ON UPDATE CASCADE ON DELETE CASCADE,
+    minute    timestamptz NOT NULL,
+    lines     integer NOT NULL DEFAULT 0,          -- transcript entries written in that minute (0: busy, filled)
+    refs      text[] NOT NULL DEFAULT '{}',
+    targets   text[] NOT NULL DEFAULT '{}',
+    pushed_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (handle, minute)
+);
+CREATE INDEX IF NOT EXISTS activity_minute_minute_idx ON board.activity_minute (minute);
+
+-- one ref -> its target ('t<id>' / 'h<thread id>'), NULL if it names nothing. A bare "#N" is a message, unless
+-- that message is older than two weeks (or missing) and a top-level task #N/ exists: agents write tasks as "#20" too.
+CREATE OR REPLACE FUNCTION board.activity_target(ref text, at timestamptz) RETURNS text LANGUAGE plpgsql STABLE AS $$
+DECLARE k text := split_part(ref, ':', 1); v text := split_part(ref, ':', 2); n bigint; th bigint; tk bigint;
+BEGIN
+    IF k = 't' AND v ~ '^\d{1,9}$' THEN
+        RETURN (SELECT 't' || t.id FROM board.task t WHERE t.id = v::bigint);
+    ELSIF k = 'p' AND v ~ '^\d{1,9}(/\d{1,9})*$' THEN
+        RETURN 't' || board.task_resolve(v);
+    ELSIF k IN ('m', 'n') AND v ~ '^\d{1,9}$' THEN
+        n := v::bigint;
+        IF k = 'n' AND n < 10 THEN RETURN NULL; END IF;      -- "#1", "#2": list items, not board objects
+        SELECT coalesce(m.thread_id, m.id) INTO th FROM board.message m
+        WHERE m.id = n AND (k = 'm' OR m.created_at > at - interval '14 days');
+        IF th IS NULL THEN
+            RETURN CASE WHEN k = 'n' THEN (SELECT 't' || t.id FROM board.task t WHERE t.path = v) END;
+        END IF;
+        SELECT x.task_id INTO tk FROM board.task_thread x JOIN board.task t ON t.id = x.task_id
+        WHERE x.thread_id = th ORDER BY length(t.path) DESC, x.linked_at DESC LIMIT 1;
+        RETURN coalesce('t' || tk, 'h' || th);
+    END IF;
+    RETURN NULL;
+END $$;
+
+-- the watcher's upload: lines "<unix minute start>\t<entries>\t<refs, space-separated>". Pushes are incremental
+-- (the watcher remembers how far it read each transcript), so a minute that shows up again adds up.
+CREATE OR REPLACE FUNCTION api.activity_push(data text) RETURNS api."text/plain"
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = board, public AS $$
+DECLARE me text := board.require_me(); n integer;
+BEGIN
+    -- v16 read every transcript of the unix user: agents sharing one (caladan) reported each other's work. v17 reads
+    -- only its own session's directory, from scratch (a new state file); v16's pushes are dropped.
+    IF coalesce((SELECT a.watcher_version FROM board.agent a WHERE a.handle = me), 0) < 17 THEN
+        RETURN 'ok 0 minutes (watcher older than v17: ignored)';
+    END IF;
+    WITH l AS (
+        SELECT split_part(x, E'\t', 1) AS e, split_part(x, E'\t', 2) AS c, split_part(x, E'\t', 3) AS r
+        FROM regexp_split_to_table(coalesce(data, ''), E'\n') x
+    ), p AS (
+        SELECT date_trunc('minute', to_timestamp(e::bigint)) AS minute,
+               CASE WHEN c ~ '^\d{1,6}$' THEN c::integer ELSE 0 END AS c,
+               ARRAY(SELECT DISTINCT left(t, 40) FROM regexp_split_to_table(r, ' ') t
+                     WHERE t ~ '^([tpmn]:\d[\d/]*|u:[A-Za-z0-9_.-]{1,30})$' LIMIT 40) AS refs
+        FROM l WHERE e ~ '^\d{9,11}$'
+    ), f AS (
+        SELECT p.minute, r FROM p, unnest(p.refs) r
+    ), g AS (
+        SELECT p.minute, sum(p.c)::integer AS c,
+               coalesce((SELECT array_agg(DISTINCT f.r) FROM f WHERE f.minute = p.minute), '{}') AS refs
+        FROM p GROUP BY p.minute
+    ), ins AS (
+        INSERT INTO board.activity_minute AS a (handle, minute, lines, refs, targets)
+        SELECT me, g.minute, g.c, g.refs,
+               ARRAY(SELECT DISTINCT x FROM unnest(g.refs) r, board.activity_target(r, g.minute) x WHERE x IS NOT NULL)
+        FROM g WHERE g.minute > now() - interval '400 days' AND g.minute < now() + interval '10 minutes'
+        ON CONFLICT (handle, minute) DO UPDATE SET
+            lines = a.lines + EXCLUDED.lines,
+            refs = ARRAY(SELECT DISTINCT u FROM unnest(a.refs || EXCLUDED.refs) u),
+            targets = ARRAY(SELECT DISTINCT u FROM unnest(a.targets || EXCLUDED.targets) u),
+            pushed_at = now()
+        RETURNING 1
+    )
+    SELECT count(*) INTO n FROM ins;
+    RETURN format('ok %s minutes', n);
+END $$;
+
+-- each active minute in [since, until) of one agent (or all), with its period and the targets it is painted with
+CREATE OR REPLACE FUNCTION board.activity_painted(since timestamptz, until timestamptz, who text DEFAULT NULL)
+RETURNS TABLE (handle text, period timestamptz, minute timestamptz, lines integer, target text, weight numeric)
+LANGUAGE sql STABLE AS $$
+    WITH m AS (
+        SELECT a.handle, a.minute, a.lines, a.targets,
+               EXISTS (SELECT 1 FROM unnest(a.refs) r WHERE r LIKE 'u:%') AS prompt
+        FROM board.activity_minute a
+        WHERE a.minute >= since AND a.minute < until AND (who IS NULL OR a.handle = who)
+    ), isl AS (   -- consecutive minutes share grp (gaps and islands)
+        SELECT m.*, m.minute - (row_number() OVER (PARTITION BY m.handle ORDER BY m.minute)) * interval '1 minute' AS grp FROM m
+    ), sg AS (    -- a new prompt (a human's "[from X]" or a watcher line) starts a new segment of the period
+        SELECT isl.*, count(*) FILTER (WHERE isl.prompt) OVER (PARTITION BY isl.handle, isl.grp ORDER BY isl.minute) AS seg FROM isl
+    ), mk AS (    -- c: how many mentioning minutes so far in the segment
+        SELECT sg.*, count(*) FILTER (WHERE cardinality(sg.targets) > 0)
+                     OVER (PARTITION BY sg.handle, sg.grp, sg.seg ORDER BY sg.minute) AS c FROM sg
+    ), tg AS (
+        SELECT mk.handle, mk.grp, mk.seg, mk.c, mk.targets FROM mk WHERE cardinality(mk.targets) > 0
+    ), att AS (
+        SELECT mk.handle, mk.grp, mk.minute, mk.lines, coalesce(tg.targets, '{}') AS targets
+        FROM mk LEFT JOIN tg ON tg.handle = mk.handle AND tg.grp = mk.grp AND tg.seg = mk.seg AND tg.c = greatest(mk.c, 1)
+    )
+    SELECT att.handle, min(att.minute) OVER (PARTITION BY att.handle, att.grp), att.minute, att.lines, t,
+           round(1.0 / greatest(cardinality(att.targets), 1), 4)
+    FROM att, unnest(CASE WHEN cardinality(att.targets) = 0 THEN '{""}'::text[] ELSE att.targets END) t
+$$;
+
+-- load per agent and target (minutes; '' = no board object mentioned), per day in time zone tz, or in total
+-- (bucket 'total': day is NULL). periods = distinct periods touching that bucket.
+CREATE OR REPLACE FUNCTION api.activity_load(since timestamptz, until timestamptz DEFAULT now(), bucket text DEFAULT 'day',
+                                             tz text DEFAULT 'UTC')
+RETURNS TABLE (handle text, day date, target text, minutes numeric, periods integer)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = board, public AS $$
+    SELECT p.handle, CASE WHEN bucket = 'total' THEN NULL ELSE (p.minute AT TIME ZONE tz)::date END,
+           p.target, round(sum(p.weight), 1), count(DISTINCT p.period)::integer
+    FROM board.activity_painted(since, until) p
+    WHERE board.require_me() IS NOT NULL
+    GROUP BY 1, 2, 3
+$$;
+
+-- the periods of activity themselves: start, end, active minutes, transcript entries, the targets with their minutes,
+-- and who drove the period (the u: refs: 'board' = watcher lines, else the human named in a "[from X]" prompt)
+CREATE OR REPLACE FUNCTION api.activity_periods(since timestamptz, until timestamptz DEFAULT now(), who text DEFAULT NULL)
+RETURNS TABLE (handle text, started timestamptz, ended timestamptz, minutes integer, lines integer, targets jsonb, drivers text[])
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = board, public AS $$
+    WITH p AS (SELECT * FROM board.activity_painted(since, until, nullif(who, '')) WHERE board.require_me() IS NOT NULL),
+    per AS (
+        SELECT p.handle, p.period, max(p.minute) + interval '1 minute' AS ended,
+               count(DISTINCT p.minute)::integer AS minutes
+        FROM p GROUP BY 1, 2
+    ), ln AS (
+        SELECT x.handle, x.period, sum(x.lines)::integer AS lines
+        FROM (SELECT DISTINCT p.handle, p.period, p.minute, p.lines FROM p) x GROUP BY 1, 2
+    ), tg AS (
+        SELECT p.handle, p.period, jsonb_agg(jsonb_build_object('target', p.target, 'minutes', round(p.m, 1)) ORDER BY p.m DESC) AS targets
+        FROM (SELECT p.handle, p.period, p.target, sum(p.weight) AS m FROM p GROUP BY 1, 2, 3) p GROUP BY 1, 2
+    )
+    SELECT per.handle, per.period, per.ended, per.minutes, ln.lines, tg.targets,
+           ARRAY(SELECT DISTINCT substr(r, 3) FROM board.activity_minute a, unnest(a.refs) r
+                 WHERE a.handle = per.handle AND a.minute >= per.period AND a.minute < per.ended AND r LIKE 'u:%') AS drivers
+    FROM per JOIN ln USING (handle, period) JOIN tg USING (handle, period)
+    ORDER BY per.period DESC
+$$;
+
 -- ---------------------------------------------------------------- grants
 GRANT USAGE ON SCHEMA api TO board_anon, board_agent, board_admin;
 REVOKE ALL ON ALL TABLES IN SCHEMA api FROM board_anon, board_agent, board_admin;
 GRANT SELECT ON api.agents, api.messages, api.threads, api.tags, api.systems,
-                api.tasks, api.task_notes, api.task_threads, api.task_escalations, api.message_stats, api.thread_links, api.docs, api.doc_versions
+                api.tasks, api.task_notes, api.task_threads, api.task_escalations, api.message_stats, api.thread_links, api.docs, api.doc_versions, api.doc_comments, api.reviews, api.review_revs, api.review_comments,
+                api.thread_summary_versions, api.projects, api.system_catalog, api.clients
       TO board_agent, board_admin;
 GRANT SELECT ON api.invites, api.login_requests TO board_admin;
 
@@ -1922,9 +2731,19 @@ GRANT EXECUTE ON FUNCTION api.update_profile(text, text, text, text, text, text,
                           api.task_update(bigint, text, text, text, text, text, bigint, text, text, boolean, text, double precision),
                           api.task_link(bigint, bigint, boolean), api.task(bigint), api.task_list(boolean, text, boolean),
                           api.push_key(), api.push_subscribe(text, text, text, text), api.push_unsubscribe(text),
-                          api.doc_save(text, text, text, text), api.doc(text, integer), api.doc_list()
+                          api.doc_save(text, text, text, text), api.doc(text, integer), api.doc_list(),
+                          api.doc_comment(text, text, text, integer, text, text), api.doc_comment_resolve(bigint, boolean),
+                          api.review_submit(text, text, text, text, text, text, text, text, text, text, text), api.review_comment(bigint, text, integer, text, text, integer, text),
+                          api.review_comment_resolve(bigint, boolean), api.review_decide(bigint, text, text), api.review_done(bigint, text, text, text),
+                          api.review_text(bigint, boolean, boolean),
+                          api.task_classify(bigint, text, text, text, text), api.system_save(text, text, text, text, text, text),
+                          api.system_instance(text, text, text, boolean), api.project_system(bigint, text, text, boolean),
+                          api.client_save(text, text, text, text), api.project_client(bigint, text, text, boolean)
       TO board_agent, board_admin;
-GRANT EXECUTE ON FUNCTION api.create_invite(text, integer, integer), api.set_active(text, boolean),
+GRANT EXECUTE ON FUNCTION api.task_urgency(bigint, text, text), api.activity_push(text), api.activity_load(timestamptz, timestamptz, text, text),
+                          api.activity_periods(timestamptz, timestamptz, text)
+      TO board_agent, board_admin;
+GRANT EXECUTE ON FUNCTION api.create_invite(text, integer, integer), api.set_active(text, boolean), api.set_offline_ok(text, boolean),
                           api.reissue_token(text),
                           api.request_login(text), api.submit_login_code(bigint, text), api.cancel_login(bigint)
       TO board_admin;
@@ -1932,5 +2751,6 @@ GRANT EXECUTE ON FUNCTION api.create_invite(text, integer, integer), api.set_act
 -- caller, so the API roles need it (it only reads the JWT claims; no table privileges come with this)
 GRANT USAGE ON SCHEMA board TO board_anon, board_agent, board_admin;
 GRANT EXECUTE ON FUNCTION board.me(), board.require_me(), board.is_admin() TO board_anon, board_agent, board_admin;
+GRANT EXECUTE ON FUNCTION board.task_project(bigint) TO board_agent, board_admin;  -- used by api.tasks / api.projects
 
 NOTIFY pgrst, 'reload schema';

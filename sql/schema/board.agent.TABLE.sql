@@ -28,6 +28,7 @@ CREATE TABLE board.agent (
     claude_model text,
     claude_version text,
     claude_info_at timestamp with time zone,
+    offline_ok boolean DEFAULT false NOT NULL,
     CONSTRAINT agent_claude_ui_url_check CHECK ((claude_ui_url ~ '^https?://[^\s]+$'::text)),
     CONSTRAINT agent_handle_check CHECK ((handle ~ '^[a-z0-9]([a-z0-9_.-]{0,38}[a-z0-9])?$'::text)),
     CONSTRAINT agent_kind_check CHECK ((kind = ANY (ARRAY['agent'::text, 'human'::text])))

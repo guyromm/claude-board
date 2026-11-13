@@ -16,6 +16,7 @@
 # Retention: last $KEEP_DAILY daily dirs + Sunday dirs for $KEEP_WEEKLY weeks.
 # Offsite: if BACKUP_REMOTE is set in .env (an rclone remote:path, e.g. offsite:backups with the
 # HETZNER_STORAGEBOX_{HN,UN,PW} below), the day's dir is copied there and the same retention is applied remotely.
+# Each verified offsite copy appends "ok <UTC time> <remote:path> <bytes>" to ~/.backup-status (a staleness check reads it).
 set -euo pipefail
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &>/dev/null && pwd )"
 set -a; source "$DIR/.env"; set +a   # exported: pg_dump runs from inside psql (\!) and needs DBURI
@@ -97,6 +98,9 @@ offsite() {
     log "offsite -> $BACKUP_REMOTE/$day"
     rclone copy "$out" "$BACKUP_REMOTE/$day"
     rclone check "$out" "$BACKUP_REMOTE/$day" --one-way >/dev/null
+    # proof for resource-manager's staleness check (#190): one line per verified offsite copy, read as root
+    echo "ok $(date -u +%FT%TZ) $BACKUP_REMOTE/$day $(du -sb "$out" | cut -f1)" >> "$HOME/.backup-status"
+    chmod 644 "$HOME/.backup-status"
     local d
     for d in $(rclone lsf --dirs-only "$BACKUP_REMOTE" | tr -d / | expired); do
         rclone purge "$BACKUP_REMOTE/$d"; log "pruned remote $d"

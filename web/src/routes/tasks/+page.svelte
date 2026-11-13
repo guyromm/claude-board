@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
-	import { api, ago, TASK_STATUSES, TASK_LABEL, type Task, type TaskStatus, type TaskEscalation, type Agent, taskRef, taskHref } from '#lib/api.svelte.ts';
+	import { api, ago, TASK_STATUSES, TASK_LABEL, HUMAN_LEVEL, type Task, type TaskStatus, type TaskEscalation, type Agent, type SystemInfo, taskRef, taskHref } from '#lib/api.svelte.ts';
 	import { every, REFRESH_MS } from '#lib/poll.ts';
 	import { groupTree } from '#lib/tasktree.ts';
 	import Body from '#lib/Body.svelte';
@@ -35,6 +35,9 @@
 			.catch((e) => (error = e.message));
 	$effect(() => { load(); return every(REFRESH_MS, load); });
 	$effect(() => { api<Agent[]>('/agents?select=handle,kind,active&active=is.true&order=kind.desc,handle').then((r) => (agents = r.data)); });
+	// the system catalog: which systems each agent runs and which projects use them (labels umbrella subtasks)
+	let systems = $state<SystemInfo[]>([]);
+	$effect(() => { api<SystemInfo[]>('/system_catalog?select=slug,owner,instances,projects&order=slug').then((r) => (systems = r.data)).catch(() => {}); });
 
 	const byId = $derived(new Map(tasks.map((t) => [t.id, t])));
 	const roots = $derived(tasks.filter((t) => t.parent_id === null || !byId.has(t.parent_id)));
@@ -54,13 +57,44 @@
 		return x;
 	};
 	const hue = (id: number) => Math.round((id * 137.508) % 360);
-	const projColor = (t: Task) => `hsl(${hue(rootOf(t).id)} 65% 50%)`;
-	// a short project name for a task: its top-level task's title up to " (" or ":" ("pethelp", "flights");
-	// a top-level task is its own project, so it's named after its owner instead
-	const projName = (t: Task) => {
-		const r = rootOf(t);
-		return r.id !== t.id ? r.title.split(/ \(|:/)[0].trim() : (t.assignee ?? 'unassigned');
+	// under an umbrella task (#119/ daily commit review: one subtask per project) a task belongs to its
+	// assignee's project, so it is named and coloured after the assignee instead of the umbrella
+	const viaOwner = (t: Task) => rootOf(t).umbrella && rootOf(t).id !== t.id && !!t.assignee;
+	const nameHue = (s: string) => [...s].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 7);
+	// what a task is for (doc:systems-and-projects): its nearest project node; else the system it (or an
+	// ancestor) names: system work; else Operations (backups, check-ups), named after its top-level task.
+	// An umbrella's subtasks (#119/ commit reviews, one per agent) go with their ASSIGNEE's work (guy 11-10): if a
+	// system the agent runs serves exactly one open project (ofana-app -> ofana), that project; else the agent's
+	// system, which serves several (classifier, scraper-engine: its commits touch many projects); else its handle.
+	type Label = { group: 0 | 1 | 2; name: string; hue: number };
+	const GROUP = ['Projects', 'Systems', 'Operations'] as const;
+	const systemOf = (t: Task) => {
+		for (let x: Task | undefined = t; x; x = x.parent_id ? byId.get(x.parent_id) : undefined) if (x.system) return x.system;
+		return null;
 	};
+	const labelOf = (t: Task): Label => {
+		const p = t.project_id ? byId.get(t.project_id) : undefined;
+		if (p) return { group: 0, name: p.slug ?? p.title.split(/ \(|:/)[0].trim(), hue: hue(p.id) };
+		if (viaOwner(t)) {
+			const a = t.assignee!;
+			const mine = systems.filter((s) => s.owner === a || s.instances.some((i) => i.agent === a))
+				.sort((x, y) => Number(y.owner === a) - Number(x.owner === a));
+			const open = (id: number) => { const p = byId.get(id); return !!p && p.status !== 'done' && p.status !== 'cancelled'; };
+			for (const s of mine) {
+				const ps = s.projects.filter((p) => open(p.id));
+				if (ps.length === 1) { const p = byId.get(ps[0].id)!; return { group: 0, name: p.slug ?? p.title.split(/ \(|:/)[0].trim(), hue: hue(p.id) }; }
+			}
+			const sys = mine[0]?.slug ?? t.assignee_system;
+			if (sys) return { group: 1, name: sys, hue: nameHue(sys) };
+			return { group: 2, name: a, hue: nameHue(a) };
+		}
+		const sys = systemOf(t);
+		if (sys) return { group: 1, name: sys, hue: nameHue(sys) };
+		const r = rootOf(t);
+		return { group: 2, name: r.title.split(/ \(|:|,/)[0].trim(), hue: hue(r.id) };
+	};
+	const projColor = (t: Task) => `hsl(${labelOf(t).hue} 65% 50%)`;
+	const projName = (t: Task) => labelOf(t).name;
 	const inScope = (t: Task) => (!incl.length || incl.some((r) => under(t, r))) && !excl.some((r) => under(t, r));
 	const shown = $derived(tasks.filter((t) => inScope(t) && (!who || t.assignee === who)));
 	const shortName = (r: Task) => r.title.split(/ \(|:/)[0].trim();
@@ -69,7 +103,18 @@
 		: !incl.length && excl.length ? `All except ${excl.map((id) => (byId.get(id) ? shortName(byId.get(id)!) : `#${id}`)).join(', ')}`
 		: '');
 	const column = (s: TaskStatus) => shown.filter((t) => t.status === s);
-	const attention = $derived(shown.filter((t) => t.needs_human));
+	// urgent first, then soon, then whenever (the PM's or the human's rating, api.task_urgency); within a level projects
+	// first, then systems, then operations; first-seen order within each
+	const lvl = (t: Task) => t.human_level ?? 2;
+	const attention = $derived(shown.filter((t) => t.needs_human).map((t, i) => ({ t, i, g: labelOf(t).group }))
+		.sort((a, b) => lvl(a.t) - lvl(b.t) || a.g - b.g || a.i - b.i).map((x) => x.t));
+	const levelCounts = $derived([1, 2, 3].map((l) => attention.filter((t) => lvl(t) === l).length));
+	async function rate(t: Task, level: number) {
+		busy = true;
+		try { await api('/rpc/task_urgency', { body: { id: t.id, level: String(level) } }); await load(); }
+		catch (e) { error = (e as Error).message; }
+		finally { busy = false; }
+	}
 	// the latest ended escalation per task in view, unless the task needs the human again
 	const answered = $derived.by(() => {
 		const seen = new Set<number>(), out: TaskEscalation[] = [];
@@ -81,12 +126,15 @@
 		return out;
 	});
 	const answeredOpen = $derived(page.url.searchParams.get('answered') === '1');
-	// folded "Needs you": the task numbers grouped by project, in first-seen order
-	const attnByProj = $derived.by(() => {
+	// folded "Needs you": per level, the task numbers grouped by project, in first-seen order
+	const attnByLevel = $derived([1, 2, 3].map((l) => {
 		const m = new Map<string, Task[]>();
-		for (const t of attention) m.set(projName(t), [...(m.get(projName(t)) ?? []), t]);
-		return [...m];
-	});
+		for (const t of attention) if (lvl(t) === l) m.set(projName(t), [...(m.get(projName(t)) ?? []), t]);
+		return [l, [...m]] as const;
+	}).filter(([, ps]) => ps.length));
+	// a level heading ("Urgent") before the first item of each level, a group heading ("Systems") before each group in it
+	const levelStart = (list: Task[], i: number) => i === 0 || lvl(list[i - 1]) !== lvl(list[i]);
+	const groupStart = (list: Task[], i: number) => levelStart(list, i) || labelOf(list[i - 1]).group !== labelOf(list[i]).group;
 
 	function setParams(kv: Record<string, string>, opts: { replace?: boolean; reset?: boolean } = {}) {
 		const q = new URLSearchParams(page.url.search);
@@ -145,6 +193,30 @@
 		} catch (e) { error = (e as Error).message; }
 		finally { busy = false; }
 	}
+
+	// reply to a "Needs you" item in place: a note from the human answers the escalation (task_update clears it
+	// and tells the PM and the assignee), so the item moves to "Answered recently" on the reload. The form opens
+	// from a small "reply" button that shows on hovering the item (always, on touch screens); drafts survive
+	// the 15 s refresh and closing the form.
+	let replying = $state<number | null>(null);
+	let replies = $state<Record<number, string>>({});
+	async function reply(t: Task) {
+		const note = (replies[t.id] ?? '').trim();
+		if (!note) return;
+		busy = true;
+		try {
+			await api('/rpc/task_update', { body: { id: t.id, note } });
+			delete replies[t.id];
+			replying = null;
+			await load();
+		} catch (e) { error = (e as Error).message; }
+		finally { busy = false; }
+	}
+	function replyKey(e: KeyboardEvent, t: Task) {
+		if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); reply(t); }
+		else if (e.key === 'Escape') replying = null;
+	}
+	const focus = (el: HTMLElement) => { el.focus(); };
 </script>
 
 <div class="head">
@@ -211,18 +283,39 @@
 	<div class="attn">
 		<button class="attn-head" onclick={toggleNeeds} aria-expanded={needsOpen}>
 			<span class="caret">{needsOpen ? '▾' : '▸'}</span> <b>Needs you</b> <span class="muted">{attention.length}</span>
+			{#if levelCounts[0]}<span class="lv lv1">{levelCounts[0]} urgent</span>{/if}
 		</button>
 		{#if needsOpen}
 			<ol>
-				{#each attention as t (t.id)}
-					<li><span class="pname" style="--proj: {projColor(t)}">{projName(t)}</span>
+				{#each attention as t, i (t.id)}
+					{#if levelStart(attention, i)}<li class="lvh lv{lvl(t)}">{HUMAN_LEVEL[lvl(t)]} <span class="muted">{levelCounts[lvl(t) - 1]}</span></li>{/if}
+					{#if groupStart(attention, i)}<li class="grp">{GROUP[labelOf(t).group]}</li>{/if}
+					<li class="need lvi{lvl(t)}" value={i + 1}><span class="pname" style="--proj: {projColor(t)}">{projName(t)}</span>
 						<a href={taskHref(t)}><b>{taskRef(t)}</b> {t.title}</a>
-						<div class="why"><Md text={t.human_reason ?? ''} /></div></li>
+						{#if replying !== t.id}<button class="link reply" class:draft={!!replies[t.id]} onclick={() => (replying = t.id)}
+							title="answer with a note: it clears this from Needs you and tells {t.assignee ?? 'the PM'}">↩ {replies[t.id] ? 'draft' : 'reply'}</button>{/if}
+						<select class="rate" value={lvl(t)} disabled={busy} title="how urgent this is (re-rate it)" aria-label="urgency of {taskRef(t)}"
+							onchange={(e) => rate(t, Number(e.currentTarget.value))}>
+							{#each [1, 2, 3] as l (l)}<option value={l}>{HUMAN_LEVEL[l].toLowerCase()}</option>{/each}
+						</select>
+						<div class="why"><Md text={t.human_reason ?? ''} /></div>
+						{#if replying === t.id}
+							<form class="replyform" onsubmit={(e) => { e.preventDefault(); reply(t); }}>
+								<textarea rows="2" placeholder="your answer, e.g. (a) approved; Ctrl+Enter sends, Esc closes" bind:value={replies[t.id]}
+									onkeydown={(e) => replyKey(e, t)} use:focus></textarea>
+								<div><button disabled={busy || !(replies[t.id] ?? '').trim()}>Send</button>
+									<button type="button" class="link" onclick={() => (replying = null)}>close</button>
+									<span class="muted small">answers it: clears it from Needs you, tells {t.assignee ?? 'the PM'}</span></div>
+							</form>
+						{/if}</li>
 				{/each}
 			</ol>
 		{:else}
-			<span class="ids">{#each attnByProj as [name, ts], g (name)}{g ? ', ' : ''}<span class="pname" style="--proj: {projColor(ts[0])}">{name}</span>
-				({#each ts as t, i (t.id)}{i ? ', ' : ''}<a href={taskHref(t)} title={t.title}>{taskRef(t)}</a>{/each}){/each}</span>
+			{#each attnByLevel as [l, ps] (l)}
+				<div class="ids"><span class="lv lv{l}">{HUMAN_LEVEL[l]}</span>
+				{#each ps as [name, ts], g (name)}{g ? ', ' : ''}<span class="pname" style="--proj: {projColor(ts[0])}">{name}</span>
+					({#each ts as t, i (t.id)}{i ? ', ' : ''}<a href={taskHref(t)} title={t.title}>{taskRef(t)}</a>{/each}){/each}</div>
+			{/each}
 		{/if}
 		{#if answered.length}
 			<div class="answered">
@@ -256,13 +349,13 @@
 			ondrop={(e) => { e.preventDefault(); drop(s, null); }}>
 			<h2><a href="/tasks/{s}{page.url.search}" title="{TASK_LABEL[s]}, one column per project">{TASK_LABEL[s]}</a> <span class="muted">{column(s).length}</span></h2>
 			{#each groupTree(column(s), byId) as { t, depth } (t.id)}
-				<a class="card panel" class:sub={depth > 0} href={taskHref(t)} style="--proj: {projColor(t)}; --depth: {depth}" title="project: #{rootOf(t).id} {rootOf(t).title}" draggable="true" class:human={t.needs_human} class:dim={dragging === t.id}
+				<a class="card panel" class:sub={depth > 0} href={taskHref(t)} style="--proj: {projColor(t)}; --depth: {depth}" title="project: #{rootOf(t).id} {rootOf(t).title}" draggable="true" class:human={t.needs_human} class:urgent={t.needs_human && lvl(t) === 1} class:dim={dragging === t.id}
 					ondragstart={(e) => { dragging = t.id; e.dataTransfer?.setData('text/plain', String(t.id)); }}
 					ondragend={() => { dragging = null; over = null; }}
 					ondrop={(e) => { e.preventDefault(); e.stopPropagation(); drop(s, t); }}>
 					{#if path(t).length && !depth}<div class="path muted">{path(t).map((p) => p.title).join(' › ')}</div>{/if}
 					<div class="title"><span class="muted">{taskRef(t)}</span> {t.title}</div>
-					{#if t.needs_human}<div class="reason">Needs you: {mdTeaser(t.human_reason ?? '')}</div>{/if}
+					{#if t.needs_human}<div class="reason">Needs you{lvl(t) !== 2 ? ` (${HUMAN_LEVEL[lvl(t)].toLowerCase()})` : ''}: {mdTeaser(t.human_reason ?? '')}</div>{/if}
 					<div class="meta">
 						<span class="chip" class:none={!t.assignee}>{t.assignee ?? 'unassigned'}</span>
 						{#if t.subtasks}<span class="muted" title="subtasks done">☑ {t.subtasks_done}/{t.subtasks}</span>{/if}
@@ -312,6 +405,30 @@
 	.attn .pname { display: inline-block; font-size: 0.78rem; font-weight: 600; padding: 0 0.4rem; margin-right: 0.3rem; border-radius: 4px;
 		color: var(--proj); background: color-mix(in srgb, var(--proj) 14%, transparent); border: 1px solid color-mix(in srgb, var(--proj) 45%, transparent); }
 	.attn .why { margin-top: 0.15rem; }
+	/* group headings: Projects / Systems / Operations (doc:systems-and-projects) */
+	.attn li.grp { list-style: none; margin: 0.4rem 0 -0.3rem -1.5rem; font-size: 0.75rem; font-weight: 700; letter-spacing: 0.04em;
+		text-transform: uppercase; color: var(--muted); }
+	.attn li.grp:first-child { margin-top: 0; }
+	.attn .grpname { font-size: 0.75rem; font-weight: 700; color: var(--muted); margin-right: 0.2rem; }
+	/* urgency levels: urgent red, soon orange, whenever grey */
+	.lv { display: inline-block; font-size: 0.72rem; font-weight: 700; padding: 0 0.45rem; border-radius: 999px; margin: 0 0.4rem 0 0.3rem;
+		text-transform: uppercase; letter-spacing: 0.03em; }
+	.lv1 { background: #c92a2a; color: #fff; }
+	.lv2 { background: #d9480f; color: #fff; }
+	.lv3 { background: var(--line); color: var(--muted); }
+	.attn .ids + .ids { margin-top: 0.25rem; }
+	.attn li.lvh { list-style: none; margin: 0.7rem 0 -0.2rem -1.5rem; font-size: 0.85rem; font-weight: 700; background: none;
+		color: var(--ink); border-left: 4px solid; padding-left: 0.4rem; text-transform: none; }
+	.attn li.lvh:first-child { margin-top: 0; }
+	.attn li.lvh.lv1 { border-color: #c92a2a; } .attn li.lvh.lv2 { border-color: #d9480f; } .attn li.lvh.lv3 { border-color: var(--line); }
+	.attn li.lvi3 { opacity: 0.85; }
+	.attn .rate { margin-left: 0.4rem; font-size: 0.75rem; padding: 0 0.2rem; height: auto; width: auto; }
+	.attn .reply { margin-left: 0.4rem; font-size: 0.8rem; opacity: 0; transition: opacity 0.15s; }
+	.attn .need:hover .reply, .attn .reply:focus-visible, .attn .reply.draft { opacity: 1; }
+	@media (hover: none) { .attn .reply { opacity: 0.8; } }
+	.attn .replyform { margin-top: 0.35rem; display: grid; gap: 0.3rem; }
+	.attn .replyform textarea { width: 100%; font: inherit; }
+	.attn .replyform div { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
 	.attn .answered { margin-top: 0.4rem; padding-top: 0.4rem; border-top: 1px solid color-mix(in srgb, #d9480f 25%, transparent); }
 	.attn .ans { margin-top: 0.15rem; white-space: pre-wrap; }
 	.attn details summary { cursor: pointer; }
@@ -329,6 +446,7 @@
 
 	.card:hover { text-decoration: none; border-color: var(--accent); }
 	.card.human { border-color: #d9480f; box-shadow: 0 0 0 1px #d9480f; }
+	.card.human.urgent { border-color: #c92a2a; box-shadow: 0 0 0 2px #c92a2a; }
 	.card.dim { opacity: 0.4; }
 	/* a subtask under its ancestor in the same column: indented one step per level */
 	.card.sub { margin-left: calc(var(--depth) * 0.9rem); margin-top: -0.25rem; }

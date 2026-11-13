@@ -6,6 +6,7 @@
 !/CLAUDE.md
 !/tmux.sh
 !/backup.sh
+!/idle-nudge.sh
 !/nginx.conf.in
 !/LICENSE
 !/setup-root.sh

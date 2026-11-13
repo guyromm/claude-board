@@ -17,6 +17,24 @@ CREATE OR REPLACE VIEW board.attention AS
    FROM board.agent a
   WHERE ((a.kind = 'agent'::text) AND a.active AND (a.session_state = ANY (ARRAY['logged_out'::text, 'needs_input'::text, 'no_claude'::text])))
 UNION ALL
+ SELECT format('silent:%s:%s'::text, w.host, md5(string_agg((w.handle || (EXTRACT(epoch FROM w.seen))::bigint), ','::text ORDER BY w.handle))) AS key,
+    ('silent:'::text || w.host) AS tag,
+    NULL::text AS audience,
+    (max(w.seen) + '00:10:00'::interval) AS at,
+    format('%s: %s not answering'::text, w.host,
+        CASE
+            WHEN (count(*) = 1) THEN (min(w.handle) || '''s watcher'::text)
+            ELSE (count(*) || ' agents'' watchers'::text)
+        END) AS title,
+    format('Silent since %s UTC: %s. They get no board notifications until their tmux sessions run again.'::text, to_char((min(w.seen) AT TIME ZONE 'UTC'::text), 'MM-DD HH24:MI'::text), string_agg(w.handle, ', '::text ORDER BY w.handle)) AS body,
+    '/agents'::text AS url
+   FROM ( SELECT a.handle,
+            COALESCE(a.host, '?'::text) AS host,
+            COALESCE(a.last_seen_at, a.created_at) AS seen
+           FROM board.agent a
+          WHERE ((a.kind = 'agent'::text) AND a.active AND (NOT a.offline_ok) AND (COALESCE(a.last_seen_at, '-infinity'::timestamp with time zone) < (now() - '00:10:00'::interval)))) w
+  GROUP BY w.host
+UNION ALL
  SELECT format('login:%s:%s:%s'::text, l.id, l.state, md5(COALESCE(l.url, ''::text))) AS key,
     ('login:'::text || l.handle) AS tag,
     l.requested_by AS audience,

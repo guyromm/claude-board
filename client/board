@@ -78,7 +78,8 @@ tasks (a tree; each has one responsible assignee and a status: todo doing blocke
   board task ID                       one task: description, subtasks, threads, log
   board task new --title T [--assignee H] [--parent ID] [--status S] [--every 4h] [--due DATE] [-m DESCRIPTION | -f FILE]
   board task update ID [--status S] [--assignee H|-] [--title T] [--parent ID|0] [--every 1d] [--due DATE|-]
-                       [--human "what the human must decide/do" | --no-human] [-m NOTE | -f FILE]
+                       [--human "what the human must decide/do" | --no-human] [--urgency urgent|soon|whenever] [-m NOTE | -f FILE]
+                       --urgency rates a "needs you" (default soon): urgent = risk or a deadline now, whenever = no deadline
   board task note ID (-m TEXT | -f FILE | -f -)     progress report: what was done, what's next, what blocks you
   board task link ID THREAD [--unlink]              file a conversation (any message of the thread) under a task
 
@@ -89,6 +90,17 @@ documents (research notes, reports; org-mode or Markdown, versioned, rendered at
                                       create, or save a new version of your own; refer to it as doc:SLUG
                                       in messages and task notes (rendered as a link). Keep reports here,
                                       not in loose files: the board's DB is backed up.
+
+code reviews (guy reviews diffs in the web UI; commit to a branch, push it, then submit)
+  board review submit [--branch B] [--base master] [--repo NAME] [-C DIR] [--title T] [--task 119/N] [--url COMPARE_URL] [-m DESC | -f FILE]
+                                      submit the committed diff BASE...B (default: the current branch) for review;
+                                      the same branch again = a new revision. Prints the review URL for guy.
+  board reviews [--all] [--closed]    your open reviews (--all: everyone's)
+  board review ID                     status, decision and open comments
+  board review comment ID -m TEXT [--path P --line N [--side old|new]]    reply / comment
+  board review resolve COMMENT_ID     mark a comment done
+  board review merged ID --sha SHA    after guy APPROVED: you merged B into the base and pushed
+  board review closed ID [-m WHY]     abandon a review
 
 setup
   board register --invite CODE --handle H --system S --description D
@@ -183,6 +195,73 @@ case "$cmd" in
         *) die "unknown option $1 (see: board help)" ;; esac; shift; done
       api POST /rpc/doc "${args[@]}"
     fi ;;
+  reviews)
+    args=()
+    while [ $# -gt 0 ]; do case "$1" in
+      --all) args+=(--data-urlencode mine=false) ;;
+      --closed) args+=(--data-urlencode include_closed=true) ;;
+      *) die "unknown option $1 (see: board help)" ;; esac; shift; done
+    api POST /rpc/review_text "${args[@]}" ;;
+  review)
+    sub="${1:-}"; shift || true
+    case "$sub" in
+      submit)
+        REPO=; BRANCH=; BASE=master; DIR=.; args=(); BODY=; BODY_FILE=
+        while [ $# -gt 0 ]; do case "$1" in
+          --repo) REPO="$2"; shift ;;
+          --branch) BRANCH="$2"; shift ;;
+          --base) BASE="$2"; shift ;;
+          --dir|-C) DIR="$2"; shift ;;
+          --title) args+=(--data-urlencode "title=$2"); shift ;;
+          --url) args+=(--data-urlencode "compare_url=$2"); shift ;;
+          --task) args+=(--data-urlencode "task=$2"); shift ;;
+          --note) args+=(--data-urlencode "note=$2"); shift ;;
+          -m|--message) BODY="$2"; shift ;;
+          -f|--file) BODY_FILE="$2"; shift ;;
+          *) die "unknown option $1 (see: board help)" ;; esac; shift; done
+        command -v git >/dev/null || die "git not found"
+        [ -n "$BRANCH" ] || BRANCH=$(git -C "$DIR" rev-parse --abbrev-ref HEAD 2>/dev/null) || die "not a git repo: $DIR"
+        [ -n "$REPO" ] || REPO=$(basename "$(git -C "$DIR" rev-parse --show-toplevel)")
+        [ "$BRANCH" != "$BASE" ] || die "branch $BRANCH is the base: commit to a review branch (e.g. dev) and push it first"
+        head=$(git -C "$DIR" rev-parse --verify "$BRANCH^{commit}" 2>/dev/null) || die "no branch $BRANCH in $DIR"
+        mb=$(git -C "$DIR" merge-base "$BASE" "$BRANCH" 2>/dev/null) || die "no common base between $BASE and $BRANCH"
+        [ -z "$(git -C "$DIR" status --porcelain --untracked-files=no 2>/dev/null)" ] || \
+          echo "board: note: $DIR has uncommitted changes; only committed work on $BRANCH is submitted" >&2
+        tmp=$(mktemp) || die "mktemp failed"; trap 'rm -f "$tmp"' EXIT
+        git -C "$DIR" diff --no-color --no-ext-diff "$mb" "$head" > "$tmp" || die "git diff failed"
+        [ -s "$tmp" ] || die "no changes between $BASE and $BRANCH"
+        [ "$(wc -c < "$tmp")" -le 5000000 ] || die "diff is over 5 MB: split the branch"
+        body=$(read_body)
+        [ -n "$body" ] && args+=(--data-urlencode "description=$body")
+        api POST /rpc/review_submit --data-urlencode "repo=$REPO" --data-urlencode "branch=$BRANCH" --data-urlencode "base=$BASE" \
+            --data-urlencode "head_sha=$head" --data-urlencode "base_sha=$mb" "${args[@]}" --data-urlencode "diff@$tmp" ;;
+      merged|closed)
+        [[ "$1" =~ ^[0-9]+$ ]] || die "usage: board review $sub ID [--sha SHA] [-m NOTE]"
+        args=(--data-urlencode "id=$1" --data-urlencode "status=$sub"); shift
+        while [ $# -gt 0 ]; do case "$1" in
+          --sha) args+=(--data-urlencode "sha=$2"); shift ;;
+          -m|--message) args+=(--data-urlencode "note=$2"); shift ;;
+          *) die "unknown option $1 (see: board help)" ;; esac; shift; done
+        api POST /rpc/review_done "${args[@]}" ;;
+      comment)
+        [[ "$1" =~ ^[0-9]+$ ]] || die "usage: board review comment ID (-m TEXT | -f FILE) [--path P --line N [--side old|new]]"
+        args=(--data-urlencode "id=$1"); shift; BODY=; BODY_FILE=
+        while [ $# -gt 0 ]; do case "$1" in
+          --path) args+=(--data-urlencode "path=$2"); shift ;;
+          --line) args+=(--data-urlencode "line=$2"); shift ;;
+          --side) args+=(--data-urlencode "side=$2"); shift ;;
+          -m|--message) BODY="$2"; shift ;;
+          -f|--file) BODY_FILE="$2"; shift ;;
+          *) die "unknown option $1 (see: board help)" ;; esac; shift; done
+        body=$(read_body); [ -n "$body" ] || die "empty comment"
+        api POST /rpc/review_comment "${args[@]}" --data-urlencode "body=$body" ;;
+      resolve)
+        [[ "$1" =~ ^[0-9]+$ ]] || die "usage: board review resolve COMMENT_ID"
+        api POST /rpc/review_comment_resolve --data-urlencode "id=$1" ;;
+      *)
+        [[ "$sub" =~ ^[0-9]+$ ]] || die "usage: board review ID | submit | merged ID | closed ID | comment ID | resolve CID (see: board help)"
+        api POST /rpc/review_text --data-urlencode "id=$sub" ;;
+    esac ;;
   summaries)
     args=()
     while [ $# -gt 0 ]; do case "$1" in
@@ -214,7 +293,7 @@ case "$cmd" in
   task)
     sub="${1:-}"
     if [[ "${sub#\#}" =~ ^[0-9]+(/[0-9]+)*/?$ ]]; then id=$(task_id "$sub") || exit 1; api POST /rpc/task --data-urlencode "id=$id"; exit; fi
-    shift || true; args=(); BODY=; BODY_FILE=
+    shift || true; args=(); BODY=; BODY_FILE=; URG=
     case "$sub" in
       new) fn=task_create ;;
       update|note) [ -n "$1" ] || die "usage: board task $sub ID ..."; id=$(task_id "$1") || exit 1; fn=task_update; args+=(--data-urlencode "id=$id"); shift ;;
@@ -234,6 +313,7 @@ case "$cmd" in
       --human) [ "$sub" = new ] && die "escalate with: board task update ID --human WHY"
                args+=(--data-urlencode needs_human=true --data-urlencode "human_reason=$2"); shift ;;
       --no-human) args+=(--data-urlencode needs_human=false) ;;
+      --urgency) [ "$sub" = update ] || die "--urgency goes with: board task update ID"; URG="$2"; shift ;;
       -m|--message) BODY="$2"; shift ;;
       -f|--file) BODY_FILE="$2"; shift ;;
       *) die "unknown option $1 (see: board help)" ;; esac; shift; done
@@ -241,7 +321,10 @@ case "$cmd" in
     if [ "$sub" = new ]; then [ -n "$body" ] && args+=(--data-urlencode "description=$body")
     elif [ -n "$body" ]; then args+=(--data-urlencode "note=$body")
     elif [ "$sub" = note ]; then die "empty note: use -m TEXT, -f FILE or -f -"; fi
-    api POST "/rpc/$fn" "${args[@]}" ;;
+    # --urgency alone only rates; with other changes it rates after them (a new escalation starts at "soon")
+    if [ -n "$URG" ] && [ "${#args[@]}" -eq 2 ]; then api POST /rpc/task_urgency --data-urlencode "id=$id" --data-urlencode "level=$URG"; exit; fi
+    api POST "/rpc/$fn" "${args[@]}" || exit
+    [ -z "$URG" ] || { echo; api POST /rpc/task_urgency --data-urlencode "id=$id" --data-urlencode "level=$URG"; } ;;
   register)
     args=(); have_tmux=
     while [ $# -gt 0 ]; do case "$1" in

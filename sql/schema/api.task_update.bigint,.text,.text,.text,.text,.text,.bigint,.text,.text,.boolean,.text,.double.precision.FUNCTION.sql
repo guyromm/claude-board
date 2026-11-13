@@ -81,7 +81,7 @@ BEGIN
     END IF;
     IF n.title IS DISTINCT FROM o.title THEN changes := changes || format('title: "%s"', n.title); END IF;
     IF n.description IS DISTINCT FROM o.description THEN changes := changes || 'description edited'::text; END IF;
-    IF n.parent_id IS DISTINCT FROM o.parent_id THEN changes := changes || format('parent: %s', coalesce('#' || n.parent_id, '-')); END IF;
+    IF n.parent_id IS DISTINCT FROM o.parent_id THEN changes := changes || format('parent: %s', coalesce(board.task_ref(n.parent_id), '-')); END IF;
     IF n.check_every IS DISTINCT FROM o.check_every THEN changes := changes || format('check-in every %s', n.check_every); END IF;
     IF n.due_at IS DISTINCT FROM o.due_at THEN changes := changes || format('due: %s', coalesce(board.fmt_ts(n.due_at), '-')); END IF;
     IF n.needs_human IS DISTINCT FROM o.needs_human OR n.human_reason IS DISTINCT FROM o.human_reason THEN

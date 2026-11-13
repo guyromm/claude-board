@@ -6,7 +6,3 @@ GRANT SELECT ON TABLE api.thread_links TO board_admin;
 
 
 --
--- PostgreSQL database dump complete
---
-
-

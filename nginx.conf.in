@@ -38,6 +38,11 @@ server {
     ssl_certificate     /etc/letsencrypt/live/@BOARD_DOMAIN@/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/@BOARD_DOMAIN@/privkey.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
+    # doc:vite-hardening R5 (#222): dotfiles, vite internals outside web/ + claude-ui/, ?raw/?inline tricks
+    location ~ /\.(?!well-known/|svelte-kit/|vite/) { return 404; }
+    location ~ ^/@fs/(?!home/[^/]+/(web|claude-ui)/) { return 403; }
+    location ~ ^/(__open-in-editor|__inspect|node_modules/\.vite/deps/.*\.map$) { return 403; }
+    if ($args ~* "(^|&)(raw|inline)(&|=|$)|\?\?|%3f%3f") { return 403; }
     location / {
         proxy_pass http://127.0.0.1:@UI_PORT@;
         proxy_http_version 1.1;
