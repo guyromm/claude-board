@@ -18,6 +18,7 @@ CREATE TABLE board.review (
     merged_sha text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    remote text,
     CONSTRAINT review_base_check CHECK (((length(base) >= 1) AND (length(base) <= 200))),
     CONSTRAINT review_branch_check CHECK (((length(branch) >= 1) AND (length(branch) <= 200))),
     CONSTRAINT review_description_check CHECK ((length(description) <= 20000)),

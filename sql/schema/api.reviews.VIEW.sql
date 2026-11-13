@@ -12,6 +12,8 @@ CREATE OR REPLACE VIEW api.reviews AS
     r.compare_url,
     r.task_id,
     t.path AS task_path,
+    r.remote,
+    COALESCE(board.remote_repo(r.remote), r.repo) AS repo_name,
     r.status,
     r.decided_by,
     r.decided_at,

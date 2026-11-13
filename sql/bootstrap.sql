@@ -1922,6 +1922,7 @@ CREATE TABLE IF NOT EXISTS board.review (
     created_at    timestamptz NOT NULL DEFAULT now(),
     updated_at    timestamptz NOT NULL DEFAULT now()
 );
+ALTER TABLE board.review ADD COLUMN IF NOT EXISTS remote text;  -- origin's URL (no credentials), for the repo name + git UI link
 CREATE UNIQUE INDEX IF NOT EXISTS review_live ON board.review (agent, repo, branch) WHERE status IN ('open', 'approved', 'changes');
 CREATE TABLE IF NOT EXISTS board.review_rev (
     review_id  bigint NOT NULL REFERENCES board.review ON DELETE CASCADE,
@@ -1953,8 +1954,26 @@ CREATE TABLE IF NOT EXISTS board.review_comment (
 );
 CREATE INDEX IF NOT EXISTS review_comment_review ON board.review_comment (review_id, created_at);
 
+-- remote URL -> (host kind, repo path). git@gma8...:NAME / git@git.webgma.co.il:NAME / ssh://git@host/NAME -> gitolite;
+-- github.com / gitlab.com -> owner/repo. Credentials in https URLs are dropped.
+CREATE OR REPLACE FUNCTION board.remote_clean(u text) RETURNS text LANGUAGE sql IMMUTABLE AS $$
+    SELECT nullif(regexp_replace(btrim(coalesce(u, '')), '^(https?://)[^/@]+@', '\1'), '')
+$$;
+CREATE OR REPLACE FUNCTION board.remote_repo(u text) RETURNS text LANGUAGE sql IMMUTABLE AS $$
+    SELECT nullif(regexp_replace(regexp_replace(regexp_replace(board.remote_clean(u), '^(?:[a-z+]+://)?(?:[^@/]+@)?[^:/]+(?::\d+)?[:/]', ''), '\.git/?$', ''), '^/+', ''), '')
+$$;
+CREATE OR REPLACE FUNCTION board.compare_url(u text, base text, branch text) RETURNS text LANGUAGE sql IMMUTABLE AS $$
+    SELECT CASE
+        WHEN u ~* 'github\.com' THEN 'https://github.com/' || board.remote_repo(u) || '/compare/' || base || '...' || branch
+        WHEN u ~* 'gitlab\.com' THEN 'https://gitlab.com/' || board.remote_repo(u) || '/-/compare/' || base || '...' || branch
+        WHEN u ~* '(gma8|git\.webgma\.co\.il)' THEN 'https://git.webgma.co.il/' || board.remote_repo(u) || '/compare/' || base || '...' || branch
+    END
+$$;
+
+DROP VIEW IF EXISTS api.reviews;
 CREATE OR REPLACE VIEW api.reviews AS
 SELECT r.id, r.agent, r.repo, r.branch, r.base, r.title, r.description, r.compare_url, r.task_id, t.path AS task_path,
+       r.remote, coalesce(board.remote_repo(r.remote), r.repo) AS repo_name,
        r.status, r.decided_by, r.decided_at, r.decision_note, r.merged_sha, r.created_at, r.updated_at,
        v.rev, v.head_sha, v.files, v.adds, v.dels, v.created_at AS rev_at,
        (SELECT count(*) FROM board.review_comment c WHERE c.review_id = r.id AND c.resolved_at IS NULL) AS open_comments
@@ -1971,14 +1990,16 @@ CREATE OR REPLACE FUNCTION board.review_url(id bigint) RETURNS text LANGUAGE sql
     SELECT coalesce(nullif(current_setting('board.web_url', true), ''), 'https://board.webgma.co.il') || '/reviews/' || id
 $$;
 
+DROP FUNCTION IF EXISTS api.review_submit(text, text, text, text, text, text, text, text, text, text, text);
 -- Submit (or re-submit) a branch for review. diff: `git diff --no-color BASE...BRANCH`. Re-submitting the same
 -- repo+branch while its review is live adds a revision and re-opens it. Returns the review URL.
 CREATE OR REPLACE FUNCTION api.review_submit(repo text, branch text, diff text, title text DEFAULT NULL,
     base text DEFAULT 'master', description text DEFAULT NULL, head_sha text DEFAULT NULL, base_sha text DEFAULT NULL,
-    compare_url text DEFAULT NULL, task text DEFAULT NULL, note text DEFAULT NULL)
+    compare_url text DEFAULT NULL, task text DEFAULT NULL, note text DEFAULT NULL, remote text DEFAULT NULL)
 RETURNS api."text/plain" LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = board, public AS $$
 DECLARE me text := board.require_me(); r board.review; n integer; tid bigint;
-        f integer; a integer; d integer; fresh boolean := false;
+        f integer; a integer; d integer; fresh boolean := false; rem text := board.remote_clean(review_submit.remote);
+        cmp text; last board.review_rev;
 BEGIN
     IF coalesce(btrim(review_submit.diff), '') = '' THEN
         RAISE EXCEPTION 'empty diff: nothing differs between % and % (commit and push first)', coalesce(review_submit.base, 'master'), review_submit.branch;
@@ -1989,20 +2010,28 @@ BEGIN
       INTO f, a, d FROM regexp_split_to_table(review_submit.diff, E'\n') l;
     SELECT * INTO r FROM review x WHERE x.agent = me AND x.repo = btrim(review_submit.repo) AND x.branch = btrim(review_submit.branch)
        AND x.status IN ('open', 'approved', 'changes') FOR UPDATE;
+    cmp := coalesce(nullif(btrim(review_submit.compare_url), ''),
+                    board.compare_url(rem, coalesce(nullif(btrim(review_submit.base), ''), 'master'), btrim(review_submit.branch)));
     IF NOT FOUND THEN
-        INSERT INTO review (agent, repo, branch, base, title, description, compare_url, task_id)
+        INSERT INTO review (agent, repo, branch, base, title, description, compare_url, task_id, remote)
         VALUES (me, btrim(review_submit.repo), btrim(review_submit.branch), coalesce(nullif(btrim(review_submit.base), ''), 'master'),
                 left(coalesce(nullif(btrim(review_submit.title), ''), btrim(review_submit.repo) || ': ' || btrim(review_submit.branch)), 300),
-                coalesce(review_submit.description, ''), nullif(btrim(review_submit.compare_url), ''), tid)
+                coalesce(review_submit.description, ''), cmp, tid, rem)
         RETURNING * INTO r;
         fresh := true;
     ELSE
         UPDATE review x SET status = 'open', updated_at = now(), decided_by = NULL, decided_at = NULL, decision_note = NULL,
                title = coalesce(nullif(btrim(review_submit.title), ''), x.title),
                description = coalesce(review_submit.description, x.description),
-               compare_url = coalesce(nullif(btrim(review_submit.compare_url), ''), x.compare_url),
+               compare_url = coalesce(cmp, x.compare_url),
+               remote = coalesce(rem, x.remote),
                task_id = coalesce(tid, x.task_id)
         WHERE x.id = r.id RETURNING * INTO r;
+        -- same head commit as the latest revision: metadata refresh only (e.g. the remote), no new revision
+        SELECT * INTO last FROM review_rev v WHERE v.review_id = r.id ORDER BY v.rev DESC LIMIT 1;
+        IF last.head_sha IS NOT NULL AND last.head_sha = nullif(btrim(review_submit.head_sha), '') THEN
+            RETURN format('review #%s refreshed (rev %s unchanged; remote %s) -- %s', r.id, last.rev, coalesce(rem, '?'), board.review_url(r.id));
+        END IF;
     END IF;
     SELECT coalesce(max(v.rev), 0) + 1 INTO n FROM review_rev v WHERE v.review_id = r.id;
     INSERT INTO review_rev (review_id, rev, head_sha, base_sha, diff, files, adds, dels, note)
@@ -2064,6 +2093,7 @@ END $$;
 CREATE OR REPLACE FUNCTION api.review_decide(id bigint, decision text, note text DEFAULT NULL)
 RETURNS json LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = board, public AS $$
 DECLARE me text := board.require_me(); r board.review; dec text := lower(btrim(review_decide.decision)); open_c bigint; msg json;
+        v board.review_rev;
 BEGIN
     IF NOT board.is_admin() THEN RAISE EXCEPTION 'only an admin decides a review' USING ERRCODE = '42501'; END IF;
     IF dec NOT IN ('approve', 'changes') THEN RAISE EXCEPTION 'decision must be approve or changes, not "%"', review_decide.decision; END IF;
@@ -2078,13 +2108,14 @@ BEGIN
            decision_note = nullif(btrim(review_decide.note), ''), updated_at = now()
     WHERE x.id = r.id RETURNING * INTO r;
     SELECT count(*) INTO open_c FROM review_comment c WHERE c.review_id = r.id AND c.resolved_at IS NULL;
+    SELECT * INTO v FROM review_rev x WHERE x.review_id = r.id ORDER BY x.rev DESC LIMIT 1;
     msg := api.post(
         format('Review #%s %s: %s', r.id, CASE WHEN dec = 'approve' THEN 'APPROVED' ELSE 'changes requested' END, left(r.title, 120)),
         CASE WHEN dec = 'approve' THEN
-            format(E'%s approved [review #%s](%s) (%s, branch %s -> %s).%s\n\nMerge %s into %s, push %s, then run: board review merged %s --sha <merge commit>%s',
-                   me, r.id, board.review_url(r.id), r.repo, r.branch, r.base,
+            format(E'%s approved [review #%s](%s) (%s, branch %s -> %s), revision %s = commit %s.%s\n\nMerge EXACTLY the reviewed commit, not the branch tip: `git merge %s` into %s, push %s, then run: board review merged %s --sha <merge commit>. If %s has commits after %s, they were not reviewed: leave them out, or re-submit first (a new revision needs a new approval).%s',
+                   me, r.id, board.review_url(r.id), r.repo, r.branch, r.base, v.rev, coalesce(left(v.head_sha, 12), '?'),
                    coalesce(E'\n\n' || nullif(btrim(review_decide.note), ''), ''),
-                   r.branch, r.base, r.base, r.id,
+                   coalesce(v.head_sha, r.branch), r.base, r.base, r.id, r.branch, coalesce(left(v.head_sha, 12), 'the reviewed commit'),
                    CASE WHEN open_c > 0 THEN format(E'\n(%s open comment(s) on it: read them first; apply small ones before merging.)', open_c) ELSE '' END)
         ELSE
             format(E'%s requested changes on [review #%s](%s) (%s, branch %s).%s\n\n%s open comment(s): see them with board review %s. Fix on the branch, push, and re-submit: board review submit ... (same branch = a new revision of this review).',
@@ -2716,6 +2747,8 @@ GRANT SELECT ON api.invites, api.login_requests TO board_admin;
 REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA api FROM PUBLIC;
 REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA board FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION api.pre_request() TO board_anon, board_agent, board_admin;
+-- helpers used inside api views (a view checks EXECUTE as the caller)
+GRANT EXECUTE ON FUNCTION board.remote_clean(text), board.remote_repo(text), board.compare_url(text, text, text) TO board_agent, board_admin;
 GRANT EXECUTE ON FUNCTION api.register(text, text, text, text, text, text, text, text, text) TO board_anon;
 GRANT EXECUTE ON FUNCTION api.login(text, text) TO board_anon;
 GRANT EXECUTE ON FUNCTION api.update_profile(text, text, text, text, text, text, text, text),
@@ -2733,7 +2766,7 @@ GRANT EXECUTE ON FUNCTION api.update_profile(text, text, text, text, text, text,
                           api.push_key(), api.push_subscribe(text, text, text, text), api.push_unsubscribe(text),
                           api.doc_save(text, text, text, text), api.doc(text, integer), api.doc_list(),
                           api.doc_comment(text, text, text, integer, text, text), api.doc_comment_resolve(bigint, boolean),
-                          api.review_submit(text, text, text, text, text, text, text, text, text, text, text), api.review_comment(bigint, text, integer, text, text, integer, text),
+                          api.review_submit(text, text, text, text, text, text, text, text, text, text, text, text), api.review_comment(bigint, text, integer, text, text, integer, text),
                           api.review_comment_resolve(bigint, boolean), api.review_decide(bigint, text, text), api.review_done(bigint, text, text, text),
                           api.review_text(bigint, boolean, boolean),
                           api.task_classify(bigint, text, text, text, text), api.system_save(text, text, text, text, text, text),

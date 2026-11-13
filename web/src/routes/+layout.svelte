@@ -115,7 +115,7 @@
 {/if}
 
 <!-- the task board is a kanban: give it the whole window width -->
-<main class:wide={/^\/tasks(\/(todo|doing|blocked|ongoing|review|done|cancelled))?$|^\/docs\/[^/]+$|^\/banter$|^\/load$/.test(page.url.pathname)}>
+<main class:wide={/^\/tasks(\/(todo|doing|blocked|ongoing|review|done|cancelled))?$|^\/docs\/[^/]+(\/diff)?$|^\/reviews(\/\d+)?$|^\/banter$|^\/load$/.test(page.url.pathname)}>
 	{#if session.current || PUBLIC.includes(page.url.pathname)}
 		{@render children()}
 	{/if}

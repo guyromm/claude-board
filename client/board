@@ -233,6 +233,9 @@ case "$cmd" in
         [ "$(wc -c < "$tmp")" -le 5000000 ] || die "diff is over 5 MB: split the branch"
         body=$(read_body)
         [ -n "$body" ] && args+=(--data-urlencode "description=$body")
+        # the branch's remote (its upstream's, else origin): the board shows the repo name and links its git UI
+        rname=$(git -C "$DIR" config --get "branch.$BRANCH.remote" 2>/dev/null); rname=${rname:-origin}
+        rurl=$(git -C "$DIR" remote get-url "$rname" 2>/dev/null) && args+=(--data-urlencode "remote=$rurl")
         api POST /rpc/review_submit --data-urlencode "repo=$REPO" --data-urlencode "branch=$BRANCH" --data-urlencode "base=$BASE" \
             --data-urlencode "head_sha=$head" --data-urlencode "base_sha=$mb" "${args[@]}" --data-urlencode "diff@$tmp" ;;
       merged|closed)

@@ -5,7 +5,7 @@
 	import { api, ago, fmtTime, session } from '#lib/api.svelte.ts';
 	import { parseDiff, type DFile, type DLine } from '#lib/udiff.ts';
 
-	type R = { id: number; agent: string; repo: string; branch: string; base: string; title: string; description: string;
+	type R = { id: number; agent: string; repo: string; repo_name: string; remote: string | null; branch: string; base: string; title: string; description: string;
 		compare_url: string | null; task_path: string | null; status: string; decided_by: string | null; decided_at: string | null;
 		decision_note: string | null; merged_sha: string | null; rev: number; head_sha: string | null; created_at: string; updated_at: string };
 	type Rev = { review_id: number; rev: number; head_sha: string | null; files: number; adds: number; dels: number; note: string | null; created_at: string };
@@ -152,14 +152,28 @@
 <p><a href="/reviews">← Code reviews</a></p>
 {#if error}<p class="error">{error}</p>{/if}
 {#if r}
+	<!-- WHERE THIS CODE LIVES (guy, 11-13): the repo, the branch and a link to the git UI, up top -->
+	<div class="repo panel">
+		<div class="rname">
+			<span class="lbl muted">repo</span>
+			{#if r.compare_url}<a class="mono big" href={r.compare_url.replace(/\/(-\/)?compare\/.*$/, '')} target="_blank" rel="noopener">{r.repo_name}</a>
+			{:else}<span class="mono big">{r.repo_name}</span>{/if}
+			<span class="mono br">{r.branch} → {r.base}</span>
+		</div>
+		{#if r.compare_url}
+			<a class="gitbtn" href={r.compare_url} target="_blank" rel="noopener">Open in {r.compare_url.includes('git.webgma.co.il') ? 'git UI' : r.compare_url.includes('github.com') ? 'GitHub' : r.compare_url.includes('gitlab.com') ? 'GitLab' : 'git'} ↗</a>
+		{:else}
+			<span class="muted small">no git UI link yet: {r.agent} re-runs <code>board review submit</code> to send its remote</span>
+		{/if}
+		{#if r.remote}<div class="muted small mono rem">{r.remote}</div>{/if}
+	</div>
 	<h1 class="title">{r.title}</h1>
 	<div class="meta muted">
 		<span class="badge s-{r.status}">{label[r.status]}</span>
-		#{r.id} · {r.agent} · <span class="mono">{r.repo}: {r.branch} → {r.base}</span>
+		#{r.id} · {r.agent}
 		· rev <select value={rev} onchange={(e) => pickRev(Number(e.currentTarget.value))}>
 			{#each revs as v}<option value={v.rev}>{v.rev} · {fmtTime(v.created_at)} · {v.head_sha?.slice(0, 8) ?? ''} · +{v.adds} −{v.dels}</option>{/each}
 		</select>
-		{#if r.compare_url}· <a href={r.compare_url} target="_blank" rel="noopener">compare on git</a>{/if}
 		{#if r.task_path}· <a href="/tasks/{r.task_path}">#{r.task_path}</a>{/if}
 		· {openCount} open comment{openCount === 1 ? '' : 's'}
 	</div>
@@ -294,4 +308,12 @@
 	@media (prefers-color-scheme: dark) {
 		:global(:root:not([data-theme='light'])) .s-open { background: #3d2e00; color: #f5c542; }
 	}
+	.repo { display: flex; flex-wrap: wrap; gap: 0.4rem 1rem; align-items: center; padding: 0.55rem 0.8rem; margin: 0.4rem 0 0.6rem; }
+	.rname { display: flex; flex-wrap: wrap; gap: 0.3rem 0.7rem; align-items: baseline; flex: 1 1 20rem; }
+	.lbl { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; }
+	.big { font-size: 1.15rem; font-weight: 700; overflow-wrap: anywhere; }
+	.br { font-size: 0.9rem; }
+	.gitbtn { padding: 0.3rem 0.8rem; border: 1px solid var(--line); border-radius: 6px; font-weight: 600; white-space: nowrap;
+		background: color-mix(in srgb, #0969da 10%, transparent); }
+	.rem { flex-basis: 100%; overflow-wrap: anywhere; font-size: 0.72rem; }
 </style>
