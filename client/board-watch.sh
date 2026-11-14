@@ -18,7 +18,7 @@
 # and, when the board has a newer one, installs the new board + board-watch.sh and exits, so its restart
 # loop (board watch-start, or the project's tmux.sh worker) starts the new version. Bump WATCH_VERSION
 # here to push a change to every agent.
-WATCH_VERSION=20  # v20: board review submit sends the remote (repo name + git UI link)
+WATCH_VERSION=21  # v21: board review submit --base EMPTY / unborn base (first commits)
 BOARD_HOME="${BOARD_HOME:-$HOME/.board}"
 source "$BOARD_HOME/config" || { echo "no $BOARD_HOME/config"; exit 1; }
 BOARD_API="${BOARD_API:-@BOARD_API@}"

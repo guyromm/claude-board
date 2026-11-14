@@ -92,7 +92,7 @@ documents (research notes, reports; org-mode or Markdown, versioned, rendered at
                                       not in loose files: the board's DB is backed up.
 
 code reviews (guy reviews diffs in the web UI; commit to a branch, push it, then submit)
-  board review submit [--branch B] [--base master] [--repo NAME] [-C DIR] [--title T] [--task 119/N] [--url COMPARE_URL] [-m DESC | -f FILE]
+  board review submit [--branch B] [--base master|EMPTY] [--repo NAME] [-C DIR] [--title T] [--task 119/N] [--url COMPARE_URL] [-m DESC | -f FILE]
                                       submit the committed diff BASE...B (default: the current branch) for review;
                                       the same branch again = a new revision. Prints the review URL for guy.
   board reviews [--all] [--closed]    your open reviews (--all: everyone's)
@@ -224,7 +224,14 @@ case "$cmd" in
         [ -n "$REPO" ] || REPO=$(basename "$(git -C "$DIR" rev-parse --show-toplevel)")
         [ "$BRANCH" != "$BASE" ] || die "branch $BRANCH is the base: commit to a review branch (e.g. dev) and push it first"
         head=$(git -C "$DIR" rev-parse --verify "$BRANCH^{commit}" 2>/dev/null) || die "no branch $BRANCH in $DIR"
-        mb=$(git -C "$DIR" merge-base "$BASE" "$BRANCH" 2>/dev/null) || die "no common base between $BASE and $BRANCH"
+        # --base EMPTY, or a base branch that doesn't exist yet (an unborn master): review the whole tree as new,
+        # diffed against git's empty tree (an app's or repo's first commit)
+        EMPTY_TREE=4b825dc642cb6eb9a060e54bf8d69288fbee4904
+        if [ "$BASE" = EMPTY ] || ! git -C "$DIR" rev-parse --verify -q "$BASE^{commit}" >/dev/null; then
+          mb=$EMPTY_TREE; echo "board: base '$BASE' is empty or doesn't exist yet: reviewing the whole tree as new" >&2
+        else
+          mb=$(git -C "$DIR" merge-base "$BASE" "$BRANCH" 2>/dev/null) || die "no common base between $BASE and $BRANCH (unrelated histories? use --base EMPTY to review the whole tree)"
+        fi
         [ -z "$(git -C "$DIR" status --porcelain --untracked-files=no 2>/dev/null)" ] || \
           echo "board: note: $DIR has uncommitted changes; only committed work on $BRANCH is submitted" >&2
         tmp=$(mktemp) || die "mktemp failed"; trap 'rm -f "$tmp"' EXIT

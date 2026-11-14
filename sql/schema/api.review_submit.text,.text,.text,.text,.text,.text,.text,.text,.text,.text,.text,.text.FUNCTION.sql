@@ -38,6 +38,15 @@ BEGIN
         -- same head commit as the latest revision: metadata refresh only (e.g. the remote), no new revision
         SELECT * INTO last FROM review_rev v WHERE v.review_id = r.id ORDER BY v.rev DESC LIMIT 1;
         IF last.head_sha IS NOT NULL AND last.head_sha = nullif(btrim(review_submit.head_sha), '') THEN
+            -- same commit but a different base (e.g. the submitter's local base branch was stale): the stored
+            -- diff was wrong, so correct this revision in place rather than add one
+            IF nullif(btrim(review_submit.base_sha), '') IS DISTINCT FROM last.base_sha THEN
+                UPDATE review_rev x SET base_sha = nullif(btrim(review_submit.base_sha), ''), diff = review_submit.diff,
+                       files = f, adds = a, dels = d
+                WHERE x.review_id = r.id AND x.rev = last.rev;
+                RETURN format('review #%s rev %s re-based (base %s, %s files, +%s -%s) -- %s', r.id, last.rev,
+                              left(review_submit.base_sha, 12), f, a, d, board.review_url(r.id));
+            END IF;
             RETURN format('review #%s refreshed (rev %s unchanged; remote %s) -- %s', r.id, last.rev, coalesce(rem, '?'), board.review_url(r.id));
         END IF;
     END IF;

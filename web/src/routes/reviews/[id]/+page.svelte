@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { page } from '$app/state';
-	import { goto } from '$app/navigation';
+	import { goto, replaceState } from '$app/navigation';
 	import { tick } from 'svelte';
 	import { api, ago, fmtTime, session } from '#lib/api.svelte.ts';
 	import { parseDiff, type DFile, type DLine } from '#lib/udiff.ts';
@@ -8,7 +8,7 @@
 	type R = { id: number; agent: string; repo: string; repo_name: string; remote: string | null; branch: string; base: string; title: string; description: string;
 		compare_url: string | null; task_path: string | null; status: string; decided_by: string | null; decided_at: string | null;
 		decision_note: string | null; merged_sha: string | null; rev: number; head_sha: string | null; created_at: string; updated_at: string };
-	type Rev = { review_id: number; rev: number; head_sha: string | null; files: number; adds: number; dels: number; note: string | null; created_at: string };
+	type Rev = { review_id: number; rev: number; head_sha: string | null; base_sha: string | null; files: number; adds: number; dels: number; note: string | null; created_at: string };
 	type C = { id: number; review_id: number; rev: number; path: string; side: 'old' | 'new'; line: number | null; quote: string;
 		body: string; author: string; created_at: string; resolved_at: string | null; resolved_by: string | null };
 
@@ -23,13 +23,55 @@
 	const want = $derived(Number(page.url.searchParams.get('rev')) || null);
 	const rev = $derived(want && revs.some((v) => v.rev === want) ? want : (revs[0]?.rev ?? null));
 	const files = $derived<DFile[]>(diffText ? parseDiff(diffText) : []);
+
+	// FILE FILTER (guy, 11-13): a regexp on the full path, live, plus which changes a file has. Both in the URL
+	// (?f=...&has=adds|dels|both) next to ?rev, so a filtered view can be shared and survives a reload.
+	let fq = $state(page.url.searchParams.get('f') ?? '');
+	let fmode = $state<'all' | 'adds' | 'dels' | 'both'>((['adds', 'dels', 'both'].includes(page.url.searchParams.get('has') ?? '') ? page.url.searchParams.get('has') : 'all') as 'all');
+	const fre = $derived.by(() => { try { return fq.trim() ? new RegExp(fq.trim(), 'i') : null; } catch { return undefined; } });
+	const shown = $derived(files.filter((f) =>
+		(fre === null || fre === undefined || fre.test(f.path) || fre.test(f.oldPath))
+		&& (fmode === 'all' || (fmode === 'adds' ? f.adds > 0 : fmode === 'dels' ? f.dels > 0 : f.adds > 0 && f.dels > 0))));
+	$effect(() => {
+		const u = new URLSearchParams(location.search);
+		if (fq.trim()) u.set('f', fq.trim()); else u.delete('f');
+		if (fmode !== 'all') u.set('has', fmode); else u.delete('has');
+		const next = u.toString() ? `?${u}` : '';
+		if (next !== location.search) replaceState(`${location.pathname}${next}${location.hash}`, {});
+	});
+
+	// WHOLE FILES (guy, 11-13: "link to the git UI"): the file at the reviewed commit and its whole-file comparison open in
+	// the review's git host. git.webgma.co.il: /<repo>/blob/<sha>/<path> and /<repo>/compare/<base>...<head>?path=<p>&context=full
+	// (gitolite, #2452); GitHub/GitLab: their blob and compare pages.
+	const GIT_FILE_LINKS = true;   // gitolite: blob + whole-file compare live since 21:0xZ 11-13 (review #40, #2458)
+	const curRev = $derived(revs.find((v) => v.rev === rev));
+	function host(): { kind: 'git' | 'github' | 'gitlab'; base: string } | null {
+		const c = r?.compare_url; if (!c) return null;
+		const m = /^(https:\/\/(git\.webgma\.co\.il|github\.com|gitlab\.com)\/.+?)\/(?:-\/)?compare\//.exec(c);
+		if (!m) return null;
+		// git.webgma.co.il: the blob + whole-file compare routes aren't live yet (asked of gitolite, #2452); until then
+		// no per-file links there (the compare page 500s on SHAs). Flip GIT_FILE_LINKS once gitolite confirms.
+		if (m[2] === 'git.webgma.co.il' && !GIT_FILE_LINKS) return null;
+		return { kind: m[2] === 'github.com' ? 'github' : m[2] === 'gitlab.com' ? 'gitlab' : 'git', base: m[1] };
+	}
+	function blobUrl(path: string, sha: string | null | undefined): string | null {
+		const h = host(); if (!h || !sha) return null;
+		const p = path.split('/').map(encodeURIComponent).join('/');
+		return h.kind === 'gitlab' ? `${h.base}/-/blob/${sha}/${p}` : `${h.base}/blob/${sha}/${p}`;
+	}
+	function fullCompareUrl(path: string): string | null {
+		const h = host(); const v = curRev; if (!h || !v?.head_sha || !v.base_sha) return null;
+		if (h.kind === 'git') return `${h.base}/compare/${v.base_sha}...${v.head_sha}?path=${encodeURIComponent(path)}&context=full`;
+		if (h.kind === 'github') return `${h.base}/compare/${v.base_sha}...${v.head_sha}`;   // GitHub: the commit range; expand the file there
+		return `${h.base}/-/compare/${v.base_sha}...${v.head_sha}`;
+	}
 	const isAdmin = $derived(!!session.current?.is_admin);
 
 	async function loadAll() {
 		try {
 			const [a, b] = await Promise.all([
 				api<R[]>(`/reviews?id=eq.${id}`),
-				api<Rev[]>(`/review_revs?review_id=eq.${id}&select=review_id,rev,head_sha,files,adds,dels,note,created_at&order=rev.desc`),
+				api<Rev[]>(`/review_revs?review_id=eq.${id}&select=review_id,rev,head_sha,base_sha,files,adds,dels,note,created_at&order=rev.desc`),
 			]);
 			if (!a.data.length) throw new Error(`no review #${id}`);
 			r = a.data[0]; revs = b.data;
@@ -159,13 +201,13 @@
 			{#if r.compare_url}<a class="mono big" href={r.compare_url.replace(/\/(-\/)?compare\/.*$/, '')} target="_blank" rel="noopener">{r.repo_name}</a>
 			{:else}<span class="mono big">{r.repo_name}</span>{/if}
 			<span class="mono br">{r.branch} → {r.base}</span>
+			{#if r.remote}<span class="muted mono rem" title="git remote">{r.remote}</span>{/if}
 		</div>
 		{#if r.compare_url}
 			<a class="gitbtn" href={r.compare_url} target="_blank" rel="noopener">Open in {r.compare_url.includes('git.webgma.co.il') ? 'git UI' : r.compare_url.includes('github.com') ? 'GitHub' : r.compare_url.includes('gitlab.com') ? 'GitLab' : 'git'} ↗</a>
 		{:else}
 			<span class="muted small">no git UI link yet: {r.agent} re-runs <code>board review submit</code> to send its remote</span>
 		{/if}
-		{#if r.remote}<div class="muted small mono rem">{r.remote}</div>{/if}
 	</div>
 	<h1 class="title">{r.title}</h1>
 	<div class="meta muted">
@@ -195,15 +237,24 @@
 	</section>
 
 	{#if files.length}
+		<div class="fbar">
+			<input type="search" placeholder="filter files by path (regexp), e.g. ^web/.*\.svelte$" bind:value={fq} class:bad={fre === undefined} />
+			<span class="seg">
+				{#each [['all', 'all'], ['adds', 'with +'], ['dels', 'with −'], ['both', '+ and −']] as [k, l]}
+					<button class:on={fmode === k} onclick={() => (fmode = k as typeof fmode)}>{l}</button>
+				{/each}
+			</span>
+			<span class="muted small">{shown.length} of {files.length} files{#if fre === undefined} · <span class="minus">invalid regexp</span>{/if}</span>
+		</div>
 		<nav class="toc">
-			{#each files as f}<a href="#{anchor(f.path)}"><span class="mono">{f.path}</span> <span class="plus">+{f.adds}</span> <span class="minus">−{f.dels}</span></a>{/each}
+			{#each shown as f}<a href="#{anchor(f.path)}"><span class="mono">{f.path}</span> <span class="plus">+{f.adds}</span> <span class="minus">−{f.dels}</span></a>{/each}
 		</nav>
 	{/if}
 	<p class="muted small">Click a line number to comment on that line, or select text in a line. Comments go to {r.agent}.</p>
 
 	<!-- svelte-ignore a11y_no_static_element_interactions -->
 	<div onmouseup={onSelect}>
-		{#each files as f (f.path)}
+		{#each shown as f, fi (fi + ":" + f.path)}
 			<section class="file panel" id={anchor(f.path)}>
 				<header>
 					<button class="link" onclick={() => toggle(f.path)}>{collapsed.has(f.path) ? '▸' : '▾'}</button>
@@ -211,6 +262,13 @@
 					{#if f.status !== 'modified'}<span class="tag">{f.status}</span>{/if}
 					<span class="plus">+{f.adds}</span> <span class="minus">−{f.dels}</span>
 					<button class="link small" onclick={() => { compose = { path: f.path, side: 'new', line: null, quote: '' }; draft = ''; }}>comment on file</button>
+					<span class="views small">
+						{#if host()}
+							{#if f.status !== 'added' && curRev?.base_sha}<a href={blobUrl(f.oldPath, curRev.base_sha)} target="_blank" rel="noopener">old file ↗</a>{/if}
+							{#if f.status !== 'deleted' && curRev?.head_sha}<a href={blobUrl(f.path, curRev.head_sha)} target="_blank" rel="noopener">new file ↗</a>{/if}
+							{#if fullCompareUrl(f.path)}<a href={fullCompareUrl(f.path)} target="_blank" rel="noopener">whole-file diff ↗</a>{/if}
+						{:else}<span class="muted" title="no git UI link for this review yet">no git link</span>{/if}
+					</span>
 				</header>
 				{#if fileComments(f.path).length}<div class="filec">{@render thread(fileComments(f.path))}</div>{/if}
 				{#if compose && compose.path === f.path && compose.line === null}{@render composer()}{/if}
@@ -309,11 +367,21 @@
 		:global(:root:not([data-theme='light'])) .s-open { background: #3d2e00; color: #f5c542; }
 	}
 	.repo { display: flex; flex-wrap: wrap; gap: 0.4rem 1rem; align-items: center; padding: 0.55rem 0.8rem; margin: 0.4rem 0 0.6rem; }
-	.rname { display: flex; flex-wrap: wrap; gap: 0.3rem 0.7rem; align-items: baseline; flex: 1 1 20rem; }
+	.rname { display: flex; flex-wrap: wrap; gap: 0.3rem 0.7rem; align-items: baseline; flex: 1 1 auto; min-width: 0; }
 	.lbl { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; }
 	.big { font-size: 1.15rem; font-weight: 700; overflow-wrap: anywhere; }
 	.br { font-size: 0.9rem; }
 	.gitbtn { padding: 0.3rem 0.8rem; border: 1px solid var(--line); border-radius: 6px; font-weight: 600; white-space: nowrap;
 		background: color-mix(in srgb, #0969da 10%, transparent); }
-	.rem { flex-basis: 100%; overflow-wrap: anywhere; font-size: 0.72rem; }
+	.rem { overflow-wrap: anywhere; font-size: 0.75rem; }
+	.repo { flex-wrap: nowrap; }
+	@media (max-width: 700px) { .repo { flex-wrap: wrap; } }
+	.fbar { display: flex; flex-wrap: wrap; gap: 0.5rem 0.8rem; align-items: center; margin: 0.6rem 0 0.3rem; }
+	.fbar input[type='search'] { flex: 1 1 18rem; max-width: 36rem; font-family: var(--mono); font-size: 0.8rem; }
+	.fbar input.bad { outline: 2px solid #cf222e; }
+	.seg { display: inline-flex; gap: 0; }
+	.seg button { font-size: 0.75rem; padding: 0.15rem 0.5rem; border-radius: 0; }
+	.seg button:first-child { border-radius: 6px 0 0 6px; } .seg button:last-child { border-radius: 0 6px 6px 0; }
+	.seg button.on { font-weight: 700; background: color-mix(in srgb, #0969da 14%, transparent); }
+	.views { margin-left: auto; display: inline-flex; gap: 0.6rem; }
 </style>

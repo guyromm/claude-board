@@ -1952,6 +1952,10 @@ CREATE TABLE IF NOT EXISTS board.review_comment (
     resolved_at timestamptz,
     resolved_by text REFERENCES board.agent
 );
+-- (11-13: a whole-file diff column was tried and dropped: guy wants whole files and full comparisons from the git UI)
+DROP VIEW IF EXISTS api.reviews;
+DROP VIEW IF EXISTS api.review_revs;
+ALTER TABLE board.review_rev DROP COLUMN IF EXISTS diff_full;
 CREATE INDEX IF NOT EXISTS review_comment_review ON board.review_comment (review_id, created_at);
 
 -- remote URL -> (host kind, repo path). git@gma8...:NAME / git@git.webgma.co.il:NAME / ssh://git@host/NAME -> gitolite;
@@ -1980,6 +1984,7 @@ SELECT r.id, r.agent, r.repo, r.branch, r.base, r.title, r.description, r.compar
 FROM board.review r
 LEFT JOIN board.task t ON t.id = r.task_id
 LEFT JOIN LATERAL (SELECT * FROM board.review_rev x WHERE x.review_id = r.id ORDER BY x.rev DESC LIMIT 1) v ON true;
+DROP VIEW IF EXISTS api.review_revs;
 CREATE OR REPLACE VIEW api.review_revs AS
 SELECT review_id, rev, head_sha, base_sha, diff, files, adds, dels, note, created_at FROM board.review_rev;
 CREATE OR REPLACE VIEW api.review_comments AS
@@ -1991,6 +1996,7 @@ CREATE OR REPLACE FUNCTION board.review_url(id bigint) RETURNS text LANGUAGE sql
 $$;
 
 DROP FUNCTION IF EXISTS api.review_submit(text, text, text, text, text, text, text, text, text, text, text);
+DROP FUNCTION IF EXISTS api.review_submit(text, text, text, text, text, text, text, text, text, text, text, text, text);
 -- Submit (or re-submit) a branch for review. diff: `git diff --no-color BASE...BRANCH`. Re-submitting the same
 -- repo+branch while its review is live adds a revision and re-opens it. Returns the review URL.
 CREATE OR REPLACE FUNCTION api.review_submit(repo text, branch text, diff text, title text DEFAULT NULL,
@@ -2030,6 +2036,15 @@ BEGIN
         -- same head commit as the latest revision: metadata refresh only (e.g. the remote), no new revision
         SELECT * INTO last FROM review_rev v WHERE v.review_id = r.id ORDER BY v.rev DESC LIMIT 1;
         IF last.head_sha IS NOT NULL AND last.head_sha = nullif(btrim(review_submit.head_sha), '') THEN
+            -- same commit but a different base (e.g. the submitter's local base branch was stale): the stored
+            -- diff was wrong, so correct this revision in place rather than add one
+            IF nullif(btrim(review_submit.base_sha), '') IS DISTINCT FROM last.base_sha THEN
+                UPDATE review_rev x SET base_sha = nullif(btrim(review_submit.base_sha), ''), diff = review_submit.diff,
+                       files = f, adds = a, dels = d
+                WHERE x.review_id = r.id AND x.rev = last.rev;
+                RETURN format('review #%s rev %s re-based (base %s, %s files, +%s -%s) -- %s', r.id, last.rev,
+                              left(review_submit.base_sha, 12), f, a, d, board.review_url(r.id));
+            END IF;
             RETURN format('review #%s refreshed (rev %s unchanged; remote %s) -- %s', r.id, last.rev, coalesce(rem, '?'), board.review_url(r.id));
         END IF;
     END IF;
@@ -2141,6 +2156,14 @@ BEGIN
     UPDATE review x SET status = st, merged_sha = coalesce(nullif(btrim(review_done.sha), ''), x.merged_sha), updated_at = now(),
            decision_note = coalesce(x.decision_note || E'\n', '') || coalesce(nullif(btrim(review_done.note), ''), '')
     WHERE x.id = r.id;
+    -- guy's "Needs you" must not keep reviews that are done (11-13): a task flagged only with review links clears
+    -- once every review it names is merged or closed (and no other review on that task is still live)
+    UPDATE task t SET needs_human = false, updated_at = now()
+     WHERE t.needs_human AND t.human_reason ~ '/reviews/[0-9]+'
+       AND t.human_reason ~ ('/reviews/' || r.id || '([^0-9]|$)')
+       AND NOT EXISTS (SELECT 1 FROM regexp_matches(t.human_reason, '/reviews/([0-9]+)', 'g') mm
+                       JOIN review o ON o.id = mm[1]::bigint WHERE o.status NOT IN ('merged', 'closed'))
+       AND NOT EXISTS (SELECT 1 FROM review o WHERE o.task_id = t.id AND o.status IN ('open', 'approved', 'changes'));
     RETURN format('review #%s %s -- %s', r.id, st, board.review_url(r.id));
 END $$;
 
