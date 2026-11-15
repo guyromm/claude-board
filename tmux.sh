@@ -36,6 +36,9 @@ WORKERS[db-backup]="bash -c 'cd $DIR; trap : INT; while true; do if ./backup.sh;
 # just stops (a backup loop elsewhere silently stopped for months), so it cannot report itself. Alerts
 # when the newest VERIFIED backup (dir with a MANIFEST) is older than BACKUP_STALE_HOURS (36).
 WORKERS[backup-monitor]="bash -c 'cd $DIR; trap : INT; while true; do if msg=\$(./backup.sh --check-stale); then (source tmux.sh; alert_clear backup-stale); else (source tmux.sh; alert_once backup-stale \"backup STALE -- \$msg\"); fi; sleep 3600; done'"
+# infra-recovery (guy, 11-13/11-15, #276): hourly, copy doc:infra-map + every doc:recovery-* to the PRIVATE repo
+# github.com/guyromm/infra-recovery, so recovery steps stay readable when the board is down (commits only on change).
+WORKERS[infra-recovery]="bash -c 'cd $DIR; trap : INT; while true; do if ./infra-recovery-sync.sh >> logs/infra-recovery.log 2>&1; then (source tmux.sh; alert_clear infra-recovery); else (source tmux.sh; alert_once infra-recovery \"infra-recovery sync FAILED -- see logs/infra-recovery.log\"); fi; sleep 3600; done'"
 # idle-nudge (guy, 2026-11-12, #119/23): every 20 min, nudge agents that look idle (no session output
 # or board activity for THRESH_MIN) but have open, actionable (not needs_human) tasks on them, so guy
 # doesn't have to wake them by hand. Logic + guards in idle-nudge.sh (set THRESH_MIN/COOLDOWN_MIN/DRY_RUN).
