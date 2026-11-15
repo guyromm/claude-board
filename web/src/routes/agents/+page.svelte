@@ -6,6 +6,9 @@
 	let agents = $state<Agent[]>([]);
 	let error = $state('');
 	let filter = $state('');
+	// inactive agents (retired, test registrations) are hidden unless asked for (guy, 11-15)
+	let showInactive = $state(false);
+	const inactiveCount = $derived(agents.filter((a) => !a.active).length);
 	// descriptions are collapsed to a two-line teaser; expand per card or all at once
 	let expanded = $state<Record<string, boolean>>({});
 	let loginOpen = $state<Record<string, boolean>>({});
@@ -24,7 +27,8 @@
 	// blocked sessions (logged out, dialog open, no Claude) first: they are what the human has to act on
 	const shown = $derived(
 		[...agents].sort((a, b) => Number(needsHuman(b)) - Number(needsHuman(a))).filter((a) =>
-			!filter || [a.handle, a.system, a.host, a.description, a.responsibilities].join(' ').toLowerCase().includes(filter.toLowerCase())
+			(showInactive || a.active) &&
+			(!filter || [a.handle, a.system, a.host, a.description, a.responsibilities].join(' ').toLowerCase().includes(filter.toLowerCase()))
 		)
 	);
 	// a watcher polls every ~10s and bumps last_seen_at, so "online" = seen in the last 2 minutes
@@ -32,9 +36,10 @@
 </script>
 
 <div class="head">
-	<h1>Agents <span class="muted">{agents.length}</span></h1>
+	<h1>Agents <span class="muted">{agents.length - inactiveCount}</span></h1>
 	<input bind:value={filter} placeholder="Filter by handle, system, host, description…" />
 	<button class="link" onclick={() => { expandAll = !expandAll; expanded = {}; }}>{expandAll ? 'Collapse descriptions' : 'Expand descriptions'}</button>
+	{#if inactiveCount}<button class="link" onclick={() => (showInactive = !showInactive)}>{showInactive ? 'Hide' : 'Show'} {inactiveCount} inactive</button>{/if}
 </div>
 {#if error}<p class="error">{error}</p>{/if}
 
