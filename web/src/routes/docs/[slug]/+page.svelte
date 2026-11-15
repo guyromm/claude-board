@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { page } from '$app/state';
+	import { goto } from '$app/navigation';
 	import { api, ago, fmtTime } from '#lib/api.svelte.ts';
 	import { renderDoc } from '#lib/render.ts';
 	import { tick } from 'svelte';
@@ -12,7 +13,16 @@
 	const slug = $derived(page.params.slug ?? '');
 	let doc = $state<Doc | null>(null);
 	let versions = $state<Ver[]>([]);
-	let pick = $state<number | null>(null); // an older version, or null = current
+	// the shown version lives in the URL (?v=N, guy 11-15) so a link opens the same revision; none = current
+	const pick = $derived.by(() => {
+		const v = Number(page.url.searchParams.get('v'));
+		return Number.isInteger(v) && v > 0 && (!doc || v !== doc.version) ? v : null;
+	});
+	function choose(v: number | null) {
+		const u = new URL(page.url.href);
+		if (v) u.searchParams.set('v', String(v)); else u.searchParams.delete('v');
+		goto(u.pathname + u.search + u.hash, { reset: false });
+	}
 	let raw = $state(false);
 	let html = $state('');
 	let error = $state('');
@@ -37,13 +47,32 @@
 
 	$effect(() => {
 		const s = slug;
-		error = ''; doc = null; versions = []; pick = null;
+		error = ''; doc = null; versions = [];
 		api<Doc[]>(`/docs?slug=eq.${encodeURIComponent(s)}`)
 			.then((r) => { if (!r.data.length) throw new Error(`no document "${s}"`); doc = r.data[0]; })
 			.catch((e) => (error = e.message));
-		api<Ver[]>(`/doc_versions?slug=eq.${encodeURIComponent(s)}&order=version.desc`).then((r) => (versions = r.data)).catch(() => {});
+		loadVersions(s);
 		comments = []; sel = null; composing = false; hover = null;
 		loadComments(s);
+	});
+	const loadVersions = (s: string) =>
+		api<Ver[]>(`/doc_versions?slug=eq.${encodeURIComponent(s)}&order=version.desc`).then((r) => (versions = r.data)).catch(() => {});
+	// a new revision saved while the page is open (guy, 11-15): poll the version number; the current view
+	// switches to it, an older pinned version (?v=N) stays put and only gains the new entry in the list
+	$effect(() => {
+		const s = slug;
+		const check = () => {
+			if (document.hidden || !doc || doc.slug !== s || composing) return;
+			api<Doc[]>(`/docs?slug=eq.${encodeURIComponent(s)}&select=version`).then((r) => {
+				const v = r.data[0]?.version;
+				if (!v || !doc || doc.slug !== s || v === doc.version) return;
+				api<Doc[]>(`/docs?slug=eq.${encodeURIComponent(s)}`).then((d) => { if (d.data.length) doc = d.data[0]; });
+				loadVersions(s); loadComments(s);
+			}).catch(() => {});
+		};
+		const t = setInterval(check, 30_000);
+		document.addEventListener('visibilitychange', check);
+		return () => { clearInterval(t); document.removeEventListener('visibilitychange', check); };
 	});
 	// PDF (guy, 11-15): the browser's own print-to-PDF of the rendered doc. Vector text, RTL/Hebrew and links
 	// stay right, and no server-side renderer runs on posted HTML. The title names the saved file.
@@ -156,7 +185,7 @@
 	<header class="meta muted">
 		<span class="mono">doc:{doc.slug}</span>
 		· {shown.format}
-		· <select value={pick ?? ''} onchange={(e) => (pick = Number(e.currentTarget.value) || null)}>
+		· <select value={pick ?? ''} onchange={(e) => choose(Number(e.currentTarget.value) || null)}>
 			<option value="">v{doc.version} (current, {fmtTime(doc.updated_at)}, {doc.updated_by})</option>
 			{#each versions as v}<option value={v.version}>v{v.version} ({fmtTime(v.saved_at)}, {v.saved_by})</option>{/each}
 		</select>
