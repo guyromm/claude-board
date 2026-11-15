@@ -45,6 +45,18 @@
 		comments = []; sel = null; composing = false; hover = null;
 		loadComments(s);
 	});
+	// PDF (guy, 11-15): the browser's own print-to-PDF of the rendered doc. Vector text, RTL/Hebrew and links
+	// stay right, and no server-side renderer runs on posted HTML. The title names the saved file.
+	async function savePdf() {
+		if (!doc) return;
+		raw = false; hover = null; sel = null; composing = false;
+		await tick();
+		const was = document.title;
+		document.title = `${doc.slug}-v${pick ?? doc.version}`;
+		const restore = () => { document.title = was; window.removeEventListener('afterprint', restore); };
+		window.addEventListener('afterprint', restore);
+		window.print();
+	}
 	const shown = $derived(pick && versions.find((v) => v.version === pick) ? versions.find((v) => v.version === pick)! : doc);
 	$effect(() => {
 		if (!shown) return;
@@ -151,8 +163,10 @@
 		{#if versions.length}· <a href="/docs/{doc.slug}/diff?{pick ? `to=${pick}` : `to=${doc.version}`}">changes</a>{/if}
 		· created by {doc.created_by} {ago(doc.created_at)}
 		· <button class="link" onclick={() => (raw = !raw)}>{raw ? 'rendered' : 'source'}</button>
+		· <button class="link" onclick={savePdf} title="Print view: choose 'Save as PDF' as the destination">PDF</button>
 		{#if open.length}· <a href="#comments">{open.length} comment{open.length === 1 ? '' : 's'}</a>{/if}
 	</header>
+	<div class="print-head">{shown.title || doc.slug} <span>doc:{doc.slug} · v{pick ?? doc.version} · {fmtTime(pick ? (versions.find((v) => v.version === pick)?.saved_at ?? doc.updated_at) : doc.updated_at)}</span></div>
 	{#if raw}<pre class="raw">{shown.body}</pre>{:else}<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions, a11y_mouse_events_have_key_events -->
 		<article class="doc panel" bind:this={article} onclick={onArticleClick} onmouseup={onSelect} ontouchend={onSelect}
 			onmouseover={onOver} onmouseleave={() => { if (!hover?.pinned) hover = null; }}></article>
@@ -257,4 +271,29 @@
 	.doc :global(ul), .doc :global(ol) { padding-left: 1.4rem; }
 	.doc :global(li) { margin: 0.15rem 0; }
 	.doc :global(blockquote) { border-left: 3px solid var(--line); margin: 0.6rem 0; padding-left: 0.8rem; color: var(--muted, inherit); }
+	.print-head { display: none; }
+	/* print / Save as PDF: only the title line and the doc itself, black on white, tables unclipped */
+	@media print {
+		@page { margin: 14mm 12mm; }
+		:global(html), :global(body) { background: #fff !important; padding: 0 !important; margin: 0 !important; }
+		/* the site bar, alerts and the chat dock (siblings of <main>), and everything on this page but the doc */
+		:global(body > div > :not(main)), :global(main > :not(.print-head, .doc, .raw)) { display: none !important; }
+		:global(main) { max-width: none !important; width: auto !important; padding: 0 !important; margin: 0 !important; }
+		.print-head { display: block; font-size: 1.1rem; font-weight: 600; color: #000; border-bottom: 1px solid #999;
+			padding-bottom: 0.3rem; margin-bottom: 0.8rem; }
+		.print-head span { display: block; font-size: 0.75rem; font-weight: 400; color: #555; }
+		.doc, .raw { border: 0 !important; box-shadow: none !important; background: #fff !important; color: #000 !important;
+			padding: 0 !important; margin: 0 !important; }
+		.doc :global(*) { color: #000 !important; }
+		.doc :global(a) { color: #1a4fb4 !important; text-decoration: underline; }
+		.doc :global(mark.cmt) { background: none !important; border: 0 !important; }
+		.doc :global(table) { display: table; overflow: visible; font-size: 0.75rem; }
+		.doc :global(th), .doc :global(td) { border: 1px solid #999 !important; }
+		.doc :global(th) { background: #eee !important; }
+		.doc :global(tr), .doc :global(pre), .doc :global(blockquote) { break-inside: avoid; }
+		.doc :global(:is(h1, h2, h3, h4)) { break-after: avoid; }
+		.doc :global(th)::after { content: none !important; }
+		.doc :global(pre) { white-space: pre-wrap; background: #f3f3f3 !important; }
+		.doc :global(:is(p, ul, ol, blockquote, pre, h1, h2, h3, h4)) { max-width: none; }
+	}
 </style>
