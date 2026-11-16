@@ -18,7 +18,8 @@
 # and, when the board has a newer one, installs the new board + board-watch.sh and exits, so its restart
 # loop (board watch-start, or the project's tmux.sh worker) starts the new version. Bump WATCH_VERSION
 # here to push a change to every agent.
-WATCH_VERSION=22  # v22: a draft left in the input line holds delivery at most 10 min, then it is set aside and typed back
+WATCH_VERSION=23  # v23: types /restart when Claude Code shows "Update installed · /restart to apply" and the session is idle (Remote Control: off for the restart, back on after)
+# v22: a draft left in the input line holds delivery at most 10 min, then it is set aside and typed back
 # v21: board review submit --base EMPTY / unborn base (first commits)
 BOARD_HOME="${BOARD_HOME:-$HOME/.board}"
 source "$BOARD_HOME/config" || { echo "no $BOARD_HOME/config"; exit 1; }
@@ -226,6 +227,57 @@ deliver() {
         && { log "delivered: $text"; : > "$PENDING"; }
     [ -n "$STASH" ] && { sleep 1; restore_draft; }
     return 0
+}
+
+# ---------------------------------------------------------------- Claude Code self-update (guy, 11-16)
+# Claude Code installs updates in the background and then shows "✔ Update installed · /restart to apply" just
+# above the input box. /restart resumes the same conversation ("Session resumed"), so the watcher types it when
+# the session is idle: nothing pending, input line empty, no dialog, no turn running ("esc to interrupt").
+# Remote Control blocks /restart ("Can't restart while Remote Control is connected"): then /rc -> "Disconnect this
+# session", /restart, and /rc -> "Enable Remote Control" again, so the phone/web link comes back (a new link).
+# Anything unexpected on screen: one Esc and give up until the next attempt (at most every RESTART_RETRY s).
+RESTART_RETRY="${BOARD_RESTART_RETRY:-1800}"; RESTART_TRIED=0
+# the last N NON-BLANK lines of the screen (Claude Code pads the space between the output and the input box)
+tail_screen() { screen | grep -a -v '^[[:space:]]*$' | tail -n "${1:-12}"; }
+type_cmd() { tmux send-keys -t "$T" -l -- "$1" && sleep 0.5 && tmux send-keys -t "$T" Enter; }
+# pick the menu option whose text matches $1 (moving the ❯ marker with Up/Down), then Enter; 1 = not found
+pick_option() {
+    local i
+    # only inside a menu: Up on the bare input line would recall history into it
+    tail_screen 16 | grep -a -q 'Enter to select' || return 1
+    for i in 1 2 3 4 5 6; do
+        tail_screen 14 | grep -a -q -E "❯.{0,12}$1" && { tmux send-keys -t "$T" Enter; return 0; }
+        tmux send-keys -t "$T" Up; sleep 0.3
+    done
+    return 1
+}
+maybe_restart() {
+    local rc=0
+    [ "$SESSION" = ok ] && [ -z "$L_ID" ] && [ ! -s "$PENDING" ] || return 0
+    tail_screen 8 | grep -a -q 'Update installed' && tail_screen 8 | grep -a -q '/restart to apply' || return 0
+    [ $(( $(now) - RESTART_TRIED )) -ge "$RESTART_RETRY" ] || return 0
+    in_mode && return 0
+    tail_screen 4 | grep -a -q 'esc to interrupt' && return 0     # a turn is running
+    input_busy && return 0                                         # a draft, a dialog or ! mode
+    RESTART_TRIED=$(now)
+    log "Claude Code update installed; typing /restart"
+    type_cmd "/restart"; sleep 6
+    if tail_screen 12 | grep -a -q 'restart while Remote Control is connected'; then
+        log "Remote Control is connected: disconnecting it for the restart (/rc), re-enabling after"
+        type_cmd "/rc"; sleep 3
+        if ! pick_option 'Disconnect this session'; then log "no 'Disconnect this session' option; giving up"; tmux send-keys -t "$T" Escape; return 0; fi
+        sleep 4; rc=1
+        type_cmd "/restart"; sleep 8
+    fi
+    if tail_screen 14 | grep -a -q 'Session resumed'; then log "restarted on the installed version (session resumed)"
+    else log "no 'Session resumed' after /restart; will retry in ${RESTART_RETRY}s"; fi
+    if [ "$rc" = 1 ]; then
+        type_cmd "/rc"; sleep 4
+        # a session that had it before reconnects at once; otherwise the menu offers "Enable Remote Control"
+        if tail_screen 6 | grep -a -q 'remote-control is active'; then log "Remote Control re-enabled"
+        elif pick_option 'Enable Remote Control'; then sleep 6; log "Remote Control re-enabled"
+        else log "could not re-enable Remote Control (no option on screen)"; tail_screen 16 | grep -a -q 'Enter to select' && tmux send-keys -t "$T" Escape; fi
+    fi
 }
 
 # ---------------------------------------------------------------- remote /login
@@ -564,6 +616,7 @@ while true; do
     fi
 
     deliver
+    maybe_restart
     check_upgrade
     if [ -n "$L_ID" ]; then sleep "$FAST"; else sleep "$POLL"; fi
 done
