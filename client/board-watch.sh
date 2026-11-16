@@ -18,7 +18,8 @@
 # and, when the board has a newer one, installs the new board + board-watch.sh and exits, so its restart
 # loop (board watch-start, or the project's tmux.sh worker) starts the new version. Bump WATCH_VERSION
 # here to push a change to every agent.
-WATCH_VERSION=21  # v21: board review submit --base EMPTY / unborn base (first commits)
+WATCH_VERSION=22  # v22: a draft left in the input line holds delivery at most 10 min, then it is set aside and typed back
+# v21: board review submit --base EMPTY / unborn base (first commits)
 BOARD_HOME="${BOARD_HOME:-$HOME/.board}"
 source "$BOARD_HOME/config" || { echo "no $BOARD_HOME/config"; exit 1; }
 BOARD_API="${BOARD_API:-@BOARD_API@}"
@@ -154,9 +155,48 @@ input_busy() {
     INPUT_WHY="someone is typing in the input line (styles: $(sed -E $'s/\e\\[([0-9;]*)m/<\\1>/g' <<<"$codes"))"; return 0
 }
 
-HELD_SINCE=0
+# A draft someone left in the input line holds delivery for at most DRAFT_GRACE seconds of no change
+# (guy, 11-16: a few stale letters in auth's input held its notifications for over an hour). Then the draft
+# is set aside (cleared line by line: Ctrl+E Ctrl+U, Backspace joins the line above), the notification is
+# delivered, and the draft is typed back exactly (multi-line with backslash+Enter), so nothing is lost.
+# The draft text is also logged. A dialog or shell (!) mode is never touched: those keep holding.
+DRAFT_GRACE="${BOARD_DRAFT_GRACE:-600}"
+# the draft's lines: the "❯ " line and its continuation lines down to the box's bottom rule
+draft_lines() {
+    tmux capture-pane -p -J -t "$T" 2>/dev/null | awk -v p="^[[:space:]]*❯"$'\xc2\xa0' '
+        $0 ~ p { n = 0; inbox = 1; sub(p, ""); d[++n] = $0; next }
+        inbox && /^[[:space:]]*[─━]{10,}[[:space:]]*$/ { inbox = 0; m = n; next }
+        inbox { sub(/^  /, ""); d[++n] = $0 }
+        END { if (inbox) m = n; for (i = 1; i <= m; i++) { sub(/[[:space:]]+$/, "", d[i]); print d[i] } }'
+}
+# empty the input line; 0 = it is empty now
+clear_input() {
+    local i
+    for i in $(seq 1 40); do
+        tmux send-keys -t "$T" C-e C-u; sleep 0.3
+        input_busy || return 0
+        [[ "$INPUT_WHY" == "someone is typing"* ]] || return 1
+        tmux send-keys -t "$T" BSpace; sleep 0.2
+    done
+    return 1
+}
+# type the set-aside draft back into an EMPTY input line (never into a dialog); 0 = done or nothing to do
+restore_draft() {
+    [ -n "$STASH" ] || return 0
+    input_busy && return 1
+    local first=1 l
+    while IFS= read -r l; do
+        [ $first = 1 ] || { tmux send-keys -t "$T" -l -- '\'; tmux send-keys -t "$T" Enter; }
+        first=0
+        tmux send-keys -t "$T" -l -- "$l"
+    done <<<"$STASH"
+    log "draft typed back into the input line"
+    STASH=
+}
+HELD_SINCE=0 HELD_DRAFT= STASH=
 deliver() {
-    local text
+    local text d
+    restore_draft || return 1
     [ -s "$PENDING" ] || return 0
     if ! pane_ok; then log "target pane $T not found; holding $(wc -l < "$PENDING") notification(s)"; return 1; fi
     # copy-mode would swallow the keystrokes as navigation commands
@@ -164,15 +204,28 @@ deliver() {
     # a logged-out session would only answer "Please run /login"; a login dialog must not get typed into
     [ "$SESSION" = ok ] && [ -z "$L_ID" ] || return 1
     if input_busy; then
+        if [[ "$INPUT_WHY" == "someone is typing"* ]]; then
+            d=$(draft_lines)
+            # the clock restarts whenever the draft changes: someone is still typing
+            [ "$d" != "$HELD_DRAFT" ] && { HELD_DRAFT=$d; HELD_SINCE=0; }
+        fi
         [ "$HELD_SINCE" = 0 ] && { HELD_SINCE=$(now); log "holding delivery: $INPUT_WHY"; }
-        [ $(( $(now) - HELD_SINCE )) -ge 900 ] && { log "still holding after 15 min: $INPUT_WHY"; HELD_SINCE=$(now); }
-        return 1
+        if [[ "$INPUT_WHY" == "someone is typing"* ]] && [ $(( $(now) - HELD_SINCE )) -ge "$DRAFT_GRACE" ]; then
+            log "draft unchanged for ${DRAFT_GRACE}s; setting it aside to deliver, then typing it back: $(printf '%s' "$HELD_DRAFT" | awk 'NR > 1 { printf " \\n " } { printf "%s", $0 }')"
+            if ! clear_input; then log "could not clear the draft ($INPUT_WHY); still holding"; HELD_SINCE=$(now); return 1; fi
+            STASH=$HELD_DRAFT
+        else
+            [ $(( $(now) - HELD_SINCE )) -ge 900 ] && { log "still holding after 15 min: $INPUT_WHY"; HELD_SINCE=$(now); }
+            return 1
+        fi
     fi
-    HELD_SINCE=0
+    HELD_SINCE=0 HELD_DRAFT=
     # one submission per poll: Claude Code queues it if it is mid-turn
     text=$(awk 'NR > 1 { printf "  ||  " } { printf "%s", $0 }' "$PENDING")
     tmux send-keys -t "$T" -l -- "$text" && sleep 0.5 && tmux send-keys -t "$T" Enter \
         && { log "delivered: $text"; : > "$PENDING"; }
+    [ -n "$STASH" ] && { sleep 1; restore_draft; }
+    return 0
 }
 
 # ---------------------------------------------------------------- remote /login
