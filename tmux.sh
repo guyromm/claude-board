@@ -131,7 +131,8 @@ all()   { echo "== workers =="; workers; echo "== panes =="; panes; }
 WORKER_OPTOUT=(
   postgrest                 # the session's first window, started by create()
   claude                    # the agent pane itself, started by the bringup flow
-  ui-prod                   # deliberate fallback only; ui (vite dev) is the live server
+  ui                        # vite DEV server: never public again (11-16 RCE via public vite dev servers, #222/9);
+                            # ui-prod (adapter-node build) is the live server. Edits go live by restarting ui-prod (it rebuilds).
 )
 start_all() {
     local name skip x
