@@ -18,7 +18,8 @@
 # and, when the board has a newer one, installs the new board + board-watch.sh and exits, so its restart
 # loop (board watch-start, or the project's tmux.sh worker) starts the new version. Bump WATCH_VERSION
 # here to push a change to every agent.
-WATCH_VERSION=23  # v23: types /restart when Claude Code shows "Update installed · /restart to apply" and the session is idle (Remote Control: off for the restart, back on after)
+WATCH_VERSION=24  # v24: answers "Try the new fullscreen renderer?" with "Yes, try it"
+# v23: types /restart when Claude Code shows "Update installed · /restart to apply" and the session is idle (Remote Control: off for the restart, back on after)
 # v22: a draft left in the input line holds delivery at most 10 min, then it is set aside and typed back
 # v21: board review submit --base EMPTY / unborn base (first commits)
 BOARD_HOME="${BOARD_HOME:-$HOME/.board}"
@@ -244,7 +245,7 @@ type_cmd() { tmux send-keys -t "$T" -l -- "$1" && sleep 0.5 && tmux send-keys -t
 pick_option() {
     local i
     # only inside a menu: Up on the bare input line would recall history into it
-    tail_screen 16 | grep -a -q 'Enter to select' || return 1
+    tail_screen 16 | grep -a -q -E 'Enter to (select|confirm)' || return 1
     for i in 1 2 3 4 5 6; do
         tail_screen 14 | grep -a -q -E "❯.{0,12}$1" && { tmux send-keys -t "$T" Enter; return 0; }
         tmux send-keys -t "$T" Up; sleep 0.3
@@ -277,6 +278,15 @@ maybe_restart() {
         if tail_screen 6 | grep -a -q 'remote-control is active'; then log "Remote Control re-enabled"
         elif pick_option 'Enable Remote Control'; then sleep 6; log "Remote Control re-enabled"
         else log "could not re-enable Remote Control (no option on screen)"; tail_screen 16 | grep -a -q 'Enter to select' && tmux send-keys -t "$T" Escape; fi
+    fi
+}
+# Known Claude Code prompts with a standing answer (guy, 11-16), answered so they don't hold notifications:
+#   "Try the new fullscreen renderer?" -> "Yes, try it"
+answer_known_dialogs() {
+    [ -z "$L_ID" ] || return 0
+    if tail_screen 12 | grep -a -q 'Try the new fullscreen renderer?'; then
+        if pick_option 'Yes, try it'; then log "answered 'Try the new fullscreen renderer?' with 'Yes, try it'"; sleep 3
+        else log "fullscreen renderer prompt seen but no 'Yes, try it' option"; fi
     fi
 }
 
@@ -615,6 +625,7 @@ while true; do
         log "login #$L_ID is no longer active on the board (cancelled or expired)"; login_abort
     fi
 
+    answer_known_dialogs
     deliver
     maybe_restart
     check_upgrade
