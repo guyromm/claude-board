@@ -1,7 +1,8 @@
 <script lang="ts">
 	import favicon from '#lib/assets/favicon.svg';
 	import { page } from '$app/state';
-	import { goto } from '$app/navigation';
+	import { goto, afterNavigate } from '$app/navigation';
+	import { head, sectionTitle } from '#lib/title.svelte.ts';
 	import { API, api, ago, session, setSession, sessionBlocked, watcherSilent, SESSION_PROBLEM } from '#lib/api.svelte.ts';
 	import { every, REFRESH_MS } from '#lib/poll.ts';
 	import { push, pushSupported, pushRefresh, pushEnable, pushDisable } from '#lib/push.svelte.ts';
@@ -13,6 +14,10 @@
 	const brand = location.hostname.split('.').length > 2 ? `.${location.hostname.split('.')[1]}` : '';
 
 	let { children }: LayoutProps = $props();
+
+	// tab title: "<page> · board" (lib/title.svelte.ts); a detail page sets head.title, cleared on navigation
+	afterNavigate((n) => { if (n.from?.url.pathname !== n.to?.url.pathname) head.title = ''; });
+	const tabTitle = $derived([head.title || sectionTitle(page.url.pathname), 'board'].filter(Boolean).join(' · '));
 
 	const PUBLIC = ['/login'];
 	$effect(() => {
@@ -63,7 +68,7 @@
 	// (event.code), so they work in any keyboard layout (Hebrew too). Not accesskey: Firefox wants
 	// Alt+Shift there, which is also a common layout-switch chord, and it matches the typed character.
 	const shortcut = (e: KeyboardEvent) => {
-		if (!e.altKey || e.ctrlKey || e.metaKey || !session.current) return;
+		if (!e.altKey || e.ctrlKey || e.metaKey || !session.current || e.defaultPrevented) return;
 		const k = e.code.startsWith('Key') ? e.code.slice(3).toLowerCase() : '';
 		const n = [...nav, ...(session.current.is_admin ? adminNav : [])].find((x) => x.key === k);
 		if (!n) return;
@@ -79,13 +84,12 @@
 
 <svelte:head>
 	<link rel="icon" href={favicon} />
-	<title>board</title>
-	
+	<title>{tabTitle}</title>
 </svelte:head>
 
 <header>
 	<div class="bar">
-		<a class="mark" href="/">board<span>{brand}</span></a>
+		<a class="mark" href="/"><img src={favicon} alt="" width="22" height="22" /><b>board<span>{brand}</span></b></a>
 		{#if session.current}
 			<nav>
 				{#each [...nav, ...(session.current.is_admin ? adminNav : [])] as n}
@@ -198,7 +202,9 @@
 		max-width: 1100px; margin: 0 auto; padding: 0.6rem 1rem;
 		display: flex; align-items: center; gap: 1.5rem; flex-wrap: wrap;
 	}
-	.mark { font-family: var(--mono); font-weight: 700; color: var(--ink); font-size: 1.05rem; }
+	.mark { font-family: var(--mono); font-weight: 700; color: var(--ink); font-size: 1.05rem; display: inline-flex; align-items: center; gap: 0.45rem; }
+	.mark:hover { text-decoration: none; }
+	.mark img { display: block; }
 	.mark span { color: var(--muted); font-weight: 400; }
 	.sessions-alert {
 		display: block; background: #d9480f; color: #fff; text-align: center; padding: 0.45rem 1rem;

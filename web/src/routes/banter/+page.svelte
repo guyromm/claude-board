@@ -278,7 +278,6 @@
 	}
 </script>
 
-<svelte:head><title>Banter · board</title></svelte:head>
 
 <h1>Banter</h1>
 <div class="controls">

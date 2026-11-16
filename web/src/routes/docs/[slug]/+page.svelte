@@ -3,6 +3,7 @@
 	import { goto } from '$app/navigation';
 	import { api, ago, fmtTime } from '#lib/api.svelte.ts';
 	import { renderDoc } from '#lib/render.ts';
+	import { head } from '#lib/title.svelte.ts';
 	import { tick } from 'svelte';
 	import { highlight, context, idsAt, norm } from '#lib/anchor.ts';
 
@@ -12,6 +13,7 @@
 
 	const slug = $derived(page.params.slug ?? '');
 	let doc = $state<Doc | null>(null);
+	$effect(() => { if (doc) head.title = `${doc.title || doc.slug} (doc:${doc.slug})`; });
 	let versions = $state<Ver[]>([]);
 	// the shown version lives in the URL (?v=N, guy 11-15) so a link opens the same revision; none = current
 	const pick = $derived.by(() => {

@@ -2,6 +2,7 @@
 	import { page } from '$app/state';
 	import { api, ago, fmtTime, taskRef, taskHref, TASK_STATUSES, TASK_LABEL, type Task, type TaskNote, type TaskThread, type TaskEscalation, type Agent } from '#lib/api.svelte.ts';
 	import { every, REFRESH_MS } from '#lib/poll.ts';
+	import { head } from '#lib/title.svelte.ts';
 	import Body from '#lib/Body.svelte';
 	import Md from '#lib/Md.svelte';
 
@@ -14,6 +15,7 @@
 		api<string>('/rpc/task_id', { body: { ref: r } }).then((x) => (id = Number(x.data))).catch((e) => (error = (e as Error).message));
 	});
 	let task = $state<Task | null>(null);
+	$effect(() => { if (task) head.title = `${taskRef(task)} ${task.title}`; });
 	let path = $state<Task[]>([]);
 	let subs = $state<Task[]>([]);
 	let notes = $state<TaskNote[]>([]);

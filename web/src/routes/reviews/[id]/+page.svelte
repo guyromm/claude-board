@@ -4,6 +4,7 @@
 	import { tick } from 'svelte';
 	import { api, ago, fmtTime, session } from '#lib/api.svelte.ts';
 	import { parseDiff, type DFile, type DLine } from '#lib/udiff.ts';
+	import { head } from '#lib/title.svelte.ts';
 
 	type R = { id: number; agent: string; repo: string; repo_name: string; remote: string | null; branch: string; base: string; title: string; description: string;
 		compare_url: string | null; task_path: string | null; status: string; decided_by: string | null; decided_at: string | null;
@@ -14,6 +15,7 @@
 
 	const id = $derived(Number(page.params.id));
 	let r = $state<R | null>(null);
+	$effect(() => { if (r) head.title = `Review #${r.id} ${r.agent}: ${r.title}`; });
 	let revs = $state<Rev[]>([]);
 	let diffText = $state('');
 	let comments = $state<C[]>([]);
@@ -165,6 +167,24 @@
 	const label: Record<string, string> = { open: 'to review', approved: 'approved: the agent merges', changes: 'changes requested',
 		merged: 'merged', closed: 'closed' };
 	const openCount = $derived(comments.filter((c) => !c.resolved_at).length);
+
+	// keyboard (guy, 11-16): Alt+A approve, Alt+R request changes, Alt+F the file filter, Alt+C the general comment box.
+	// Capture phase, so they win over the layout's Alt+A/R/C menu shortcuts on this page (it skips defaultPrevented).
+	let filterEl = $state<HTMLInputElement | null>(null), generalEl = $state<HTMLTextAreaElement | null>(null);
+	const canDecide = $derived(!!r && isAdmin && !['merged', 'closed'].includes(r.status));
+	$effect(() => {
+		const onKey = (e: KeyboardEvent) => {
+			if (!e.altKey || e.ctrlKey || e.metaKey) return;
+			const k = e.code.startsWith('Key') ? e.code.slice(3).toLowerCase() : '';
+			const go = (f: () => void) => { e.preventDefault(); f(); };
+			if (k === 'a' && canDecide) go(() => { if (!deciding) decide('approve'); });
+			else if (k === 'r' && canDecide) go(() => { if (!deciding) decide('changes'); });
+			else if (k === 'f' && filterEl) go(() => { filterEl!.focus(); filterEl!.select(); });
+			else if (k === 'c' && generalEl) go(() => { generalEl!.scrollIntoView({ block: 'center' }); generalEl!.focus(); });
+		};
+		window.addEventListener('keydown', onKey, true);
+		return () => window.removeEventListener('keydown', onKey, true);
+	});
 </script>
 
 {#snippet thread(cs: C[])}
@@ -229,16 +249,16 @@
 			<textarea bind:value={reason} rows="2" placeholder="Note for the agent (required for 'request changes' unless there are open comments)"></textarea>
 			{#if derr}<p class="error">{derr}</p>{/if}
 			<div class="row">
-				<button class="ok" onclick={() => decide('approve')} disabled={deciding}>✓ Approve: merge &amp; push</button>
-				<button class="no" onclick={() => decide('changes')} disabled={deciding}>✗ Request changes</button>
-				<span class="muted small">{r.agent} gets a board message either way.</span>
+				<button class="ok" onclick={() => decide('approve')} disabled={deciding} title="Alt+A">✓ Approve: merge &amp; push</button>
+				<button class="no" onclick={() => decide('changes')} disabled={deciding} title="Alt+R">✗ Request changes</button>
+				<span class="muted small">{r.agent} gets a board message either way. Keys: Alt+A approve · Alt+R request changes · Alt+F filter · Alt+C comment</span>
 			</div>
 		{:else if !r.decided_at}<p class="muted small">Waiting for guy's review.</p>{/if}
 	</section>
 
 	{#if files.length}
 		<div class="fbar">
-			<input type="search" placeholder="filter files by path (regexp), e.g. ^web/.*\.svelte$" bind:value={fq} class:bad={fre === undefined} />
+			<input type="search" bind:this={filterEl} title="Alt+F" placeholder="filter files by path (regexp), e.g. ^web/.*\.svelte$" bind:value={fq} class:bad={fre === undefined} />
 			<span class="seg">
 				{#each [['all', 'all'], ['adds', 'with +'], ['dels', 'with −'], ['both', '+ and −']] as [k, l]}
 					<button class:on={fmode === k} onclick={() => (fmode = k as typeof fmode)}>{l}</button>
@@ -305,7 +325,7 @@
 	<section class="general">
 		<h2>General comments</h2>
 		{@render thread(general)}
-		<textarea bind:value={generalDraft} rows="3" placeholder="A comment on the whole change"></textarea>
+		<textarea bind:this={generalEl} bind:value={generalDraft} rows="3" title="Alt+C" placeholder="A comment on the whole change (Alt+C)"></textarea>
 		<button onclick={saveGeneral} disabled={!generalDraft.trim()}>Comment</button>
 	</section>
 	{#if elsewhere.length}

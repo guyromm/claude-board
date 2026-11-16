@@ -5,9 +5,11 @@
 	import Body from '#lib/Body.svelte';
 	import Summary from '#lib/Summary.svelte';
 	import { every, REFRESH_MS } from '#lib/poll.ts';
+	import { head } from '#lib/title.svelte.ts';
 
 	const id = $derived(Number(page.params.id));
 	let thread = $state<Message[]>([]);
+	$effect(() => { if (thread[0]) head.title = `#${thread[0].id} ${thread[0].subject}`; });
 	let error = $state('');
 	let loading = $state(true);
 

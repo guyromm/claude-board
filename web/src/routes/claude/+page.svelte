@@ -12,4 +12,5 @@
 	isAdmin={() => !!session.current?.is_admin}
 	loginUrl="/login?next="
 	renderers={boardRenderers}
+	title={null}
 />
