@@ -18,7 +18,8 @@
 # and, when the board has a newer one, installs the new board + board-watch.sh and exits, so its restart
 # loop (board watch-start, or the project's tmux.sh worker) starts the new version. Bump WATCH_VERSION
 # here to push a change to every agent.
-WATCH_VERSION=24  # v24: answers "Try the new fullscreen renderer?" with "Yes, try it"
+WATCH_VERSION=25  # v25: answers the workspace trust prompt with "Yes, I trust this folder"; menu picker searches down and up
+# v24: answers "Try the new fullscreen renderer?" with "Yes, try it"
 # v23: types /restart when Claude Code shows "Update installed · /restart to apply" and the session is idle (Remote Control: off for the restart, back on after)
 # v22: a draft left in the input line holds delivery at most 10 min, then it is set aside and typed back
 # v21: board review submit --base EMPTY / unborn base (first commits)
@@ -246,9 +247,10 @@ pick_option() {
     local i
     # only inside a menu: Up on the bare input line would recall history into it
     tail_screen 16 | grep -a -q -E 'Enter to (select|confirm)' || return 1
-    for i in 1 2 3 4 5 6; do
+    # Enter only once the ❯ marker sits on the wanted option: search down first, then back up
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do
         tail_screen 14 | grep -a -q -E "❯.{0,12}$1" && { tmux send-keys -t "$T" Enter; return 0; }
-        tmux send-keys -t "$T" Up; sleep 0.3
+        if [ "$i" -le 6 ]; then tmux send-keys -t "$T" Down; else tmux send-keys -t "$T" Up; fi; sleep 0.3
     done
     return 1
 }
@@ -282,8 +284,14 @@ maybe_restart() {
 }
 # Known Claude Code prompts with a standing answer (guy, 11-16), answered so they don't hold notifications:
 #   "Try the new fullscreen renderer?" -> "Yes, try it"
+#   "Quick safety check: Is this a project you created or one you trust?" -> "Yes, I trust this folder"
+#     (its default is "No, exit", which would quit Claude: pick_option presses Enter only on the Yes line)
 answer_known_dialogs() {
     [ -z "$L_ID" ] || return 0
+    if tail_screen 20 | grep -a -q 'Is this a project you created or one you trust'; then
+        if pick_option 'Yes, I trust this folder'; then log "answered the workspace trust prompt with 'Yes, I trust this folder'"; sleep 4
+        else log "workspace trust prompt seen but no 'Yes, I trust this folder' option"; fi
+    fi
     if tail_screen 12 | grep -a -q 'Try the new fullscreen renderer?'; then
         if pick_option 'Yes, try it'; then log "answered 'Try the new fullscreen renderer?' with 'Yes, try it'"; sleep 3
         else log "fullscreen renderer prompt seen but no 'Yes, try it' option"; fi
