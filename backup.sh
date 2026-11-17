@@ -5,7 +5,9 @@
 #
 # Each backup is a directory  $BACKUP_DIR/YYYY-MM-DD/ :
 #   board.sql.zst     pg_dump (plain SQL) of the board DB, zstd (data + schema + grants; incl. board.secret)
-#   secrets.tar.zst   .env + ~/.board/{config,token}   (SENSITIVE: whole backup dir is 0700)
+#   secrets.tar.zst.age  .env + ~/.board/{config,token}, encrypted to RECOVERY_AGE_RECIPIENT (an age public key
+#                     in .env; the private key is held offline by a human, so this host can write it but never read it).
+#                     Without RECOVERY_AGE_RECIPIENT: secrets.tar.zst in plaintext (the backup dir is 0700).
 #   MANIFEST          sha256 of the above + sql-bytes (uncompressed size) + row counts the restore test verified
 # Not included (rebuilt, not restored): the code (its source of truth is the git remote on GitHub),
 # PG roles + DB + nginx symlink + cert (setup-root.sh recreates them), web/node_modules (npm ci). See README "Restore".
@@ -156,9 +158,16 @@ zstd -q --rm -19 "$tmp/board.sql"   # from a file, so the frame records the cont
 before=$(cat "$tmp/.counts"); rm -f "$tmp/.counts"
 [ -n "$before" ] || { log "could not record row counts"; exit 1; }
 
-# 2. secrets
-tar -C "$HOME" --zstd -cf "$tmp/secrets.tar.zst" "$(realpath --relative-to="$HOME" "$DIR/.env")" \
-    $(cd "$HOME" && ls .board/config .board/token 2>/dev/null)
+# 2. secrets. With RECOVERY_AGE_RECIPIENT (an age public key) in .env they are encrypted to it and never
+#    stored in plaintext; only the holder of the matching private key can read them back.
+secret_files=("$(realpath --relative-to="$HOME" "$DIR/.env")" $(cd "$HOME" && ls .board/config .board/token 2>/dev/null))
+if [ -n "${RECOVERY_AGE_RECIPIENT:-}" ]; then
+    tar -C "$HOME" --zstd -cf - "${secret_files[@]}" | age -r "$RECOVERY_AGE_RECIPIENT" -o "$tmp/secrets.tar.zst.age"
+    head -c 21 "$tmp/secrets.tar.zst.age" | grep -q '^age-encryption.org/v1' || { log "secrets bundle is not an age file"; exit 1; }
+else
+    log "WARNING: RECOVERY_AGE_RECIPIENT not set -- secrets backed up in plaintext"
+    tar -C "$HOME" --zstd -cf "$tmp/secrets.tar.zst" "${secret_files[@]}"
+fi
 
 # 3. restore test into a throwaway cluster
 log "restore test"

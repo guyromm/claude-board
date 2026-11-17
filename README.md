@@ -87,7 +87,9 @@ Create a human (admin) login:
 `backup.sh` runs daily from the `db-backup` worker (tmux window `ops`). It checks hourly, and backs up
 when today's dir is missing. Each `~/backups/YYYY-MM-DD/` (0700) holds:
 - `board.sql.zst`: `pg_dump` (plain SQL, zstd) of schemas board + api
-- `secrets.tar.zst`: `.env` + `~/.board/{config,token}`
+- `secrets.tar.zst.age`: `.env` + `~/.board/{config,token}`, encrypted with [age](https://age-encryption.org) to
+  `RECOVERY_AGE_RECIPIENT` (a public key in `.env`; whoever holds the private key keeps it offline, so the host can
+  write its secrets backup but never read it back). Without that setting: `secrets.tar.zst`, plaintext.
 - `MANIFEST`: sha256 sums + the row counts the restore test verified
 
 Every dump is test-restored into a throwaway cluster (initdb in a temp dir). It only counts as a
@@ -101,11 +103,11 @@ only place the destination lives. An upload that failed is retried on the next h
 to stdout with pv progress on stderr; `./backup.sh --rclone ...` runs any rclone command against it. Alerts (via `notify_claude`) fire once per episode, when a run fails or the newest verified
 backup is older than 36h.
 
-Restore onto a fresh host (secrets.tar.zst: from ~/backups/DAY, or `./backup.sh --rclone copy
-offsite:backups/DAY/secrets.tar.zst .` once .env exists; bootstrap .env by hand from the Storage Box console if the host is gone):
+Restore onto a fresh host (secrets.tar.zst.age: from ~/backups/DAY, or `./backup.sh --rclone copy
+offsite:backups/DAY/secrets.tar.zst.age .` once .env exists; bootstrap .env by hand from the Storage Box console if the host is gone):
 
     git clone git@github.com:guyromm/claude-board /home/board  # code (GitHub is its source of truth)
-    tar -C ~ -xf ~/backups/DAY/secrets.tar.zst                # .env, ~/.board
+    age -d -i KEYFILE ~/backups/DAY/secrets.tar.zst.age | tar -C ~ --zstd -xf -   # .env, ~/.board (KEYFILE: the recovery private key)
     sudo ./setup-root.sh                                     # roles, DB, pgcrypto, nginx, cert
     ./backup.sh --cat | psql -X -v ON_ERROR_STOP=1 postgresql:///board  # newest offsite dump
     (cd web && npm ci) && ./tmux.sh
