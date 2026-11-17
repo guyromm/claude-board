@@ -13,6 +13,7 @@ cd "$(dirname "$0")"
 U="$(grep ^DBURI .env | cut -d= -f2-)"
 THRESH_MIN="${THRESH_MIN:-20}"
 COOLDOWN_MIN="${COOLDOWN_MIN:-90}"
+REPLIED_H="${REPLIED_H:-6}"
 DRY_RUN="${DRY_RUN:-0}"
 BOARD="https://board.webgma.co.il"
 
@@ -23,7 +24,9 @@ with act as (select handle, max(minute) last_min from board.activity_minute grou
  recv as (select r.handle, max(m.created_at) t from board.message m join board.recipient r on r.message_id=m.id group by r.handle),
  noted as (select author handle, max(created_at) t from board.task_note group by author),
  nudged as (select r.handle, max(m.created_at) t from board.message m join board.recipient r on r.message_id=m.id
-            where m.sender='board' and m.subject like 'Idle nudge:%' group by r.handle)
+            where m.sender='board' and m.subject like 'Idle nudge:%' group by r.handle),
+ -- an agent that answered a nudge ("running on its own", "waiting on X") isn't nudged again for REPLIED_H hours
+ replied as (select sender handle, max(created_at) t from board.message where subject like 'Re: Idle nudge:%' group by sender)
 select a.handle
 from board.agent a
 left join act  on act.handle=a.handle
@@ -31,6 +34,7 @@ left join sent on sent.handle=a.handle
 left join recv on recv.handle=a.handle
 left join noted on noted.handle=a.handle
 left join nudged on nudged.handle=a.handle
+left join replied on replied.handle=a.handle
 where a.session_state='ok'
   and a.handle not in ('board','guy','acttest','acttest2')
   and coalesce(act.last_min,'epoch')  < now() - make_interval(mins => $THRESH_MIN)
@@ -38,6 +42,7 @@ where a.session_state='ok'
   and coalesce(recv.t,'epoch')         < now() - make_interval(mins => $THRESH_MIN)
   and coalesce(noted.t,'epoch')        < now() - make_interval(mins => $THRESH_MIN)
   and coalesce(nudged.t,'epoch')       < now() - make_interval(mins => $COOLDOWN_MIN)
+  and coalesce(replied.t,'epoch')      < now() - make_interval(hours => $REPLIED_H)
   and exists (select 1 from board.task t
               where t.assignee=a.handle and t.status in ('todo','doing')
                 and not coalesce(t.needs_human,false) and t.kind <> 'project')
