@@ -7,6 +7,9 @@
 # COOLDOWN_MIN. The nudge lists the agent's open todo/doing tasks (not needs_human) with
 # links and invites "scheduled later / blocked / busy on my own product" replies.
 #
+# A task the agent named (#path) in a nudge reply within SKIP_TASK_H (24) hours is left out:
+# "reply and I'll stop nudging for it" (ext-caladan was nudged 3x for one running walk, #67/6).
+#
 # DRY_RUN=1 prints who it WOULD nudge and the message, and posts nothing.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -14,6 +17,7 @@ U="$(grep ^DBURI .env | cut -d= -f2-)"
 THRESH_MIN="${THRESH_MIN:-20}"
 COOLDOWN_MIN="${COOLDOWN_MIN:-90}"
 REPLIED_H="${REPLIED_H:-6}"
+SKIP_TASK_H="${SKIP_TASK_H:-24}"
 DRY_RUN="${DRY_RUN:-0}"
 BOARD="https://board.webgma.co.il"
 
@@ -45,14 +49,18 @@ where a.session_state='ok'
   and coalesce(replied.t,'epoch')      < now() - make_interval(hours => $REPLIED_H)
   and exists (select 1 from board.task t
               where t.assignee=a.handle and t.status in ('todo','doing')
-                and not coalesce(t.needs_human,false) and t.kind <> 'project')
+                and not coalesce(t.needs_human,false) and t.kind <> 'project'
+                and not exists (select 1 from board.message rm   -- the agent's nudge reply named this task
+                                where rm.sender=t.assignee and rm.subject like 'Re: Idle nudge:%'
+                                  and rm.created_at > now() - make_interval(hours => $SKIP_TASK_H)
+                                  and rm.body ~ ('#' || t.path || '/?([^0-9/]|\$)')))
 order by a.handle
 SQL
 }
 
 open_tasks_md() {
   local h="$1"
-  psql -X -At "$U" -c "select '- [#' || coalesce(path, id::text) || '](${BOARD}/tasks/' || coalesce(path, id::text) || ') ' || replace(left(title,64),E'\n',' ') from board.task where assignee='$h' and status in ('todo','doing') and not coalesce(needs_human,false) and kind <> 'project' order by id"
+  psql -X -At "$U" -c "select '- [#' || coalesce(path, id::text) || '](${BOARD}/tasks/' || coalesce(path, id::text) || ') ' || replace(left(title,64),E'\n',' ') from board.task where assignee='$h' and status in ('todo','doing') and not coalesce(needs_human,false) and kind <> 'project' and not exists (select 1 from board.message rm where rm.sender=task.assignee and rm.subject like 'Re: Idle nudge:%' and rm.created_at > now() - make_interval(hours => $SKIP_TASK_H) and rm.body ~ ('#' || task.path || '/?([^0-9/]|\$)')) order by id"
 }
 
 for h in $(idle_agents); do
