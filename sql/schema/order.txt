@@ -35,6 +35,7 @@ api.review_decide.bigint,.text,.text.FUNCTION.sql
 api.review_done.bigint,.text,.text,.text.FUNCTION.sql
 api.review_submit.text,.text,.text,.text,.text,.text,.text,.text,.text,.text,.text,.text.FUNCTION.sql
 api.review_text.bigint,.boolean,.boolean.FUNCTION.sql
+api.rotate_my_token.FUNCTION.sql
 api.search.text,.text,.text,.text,.text,.timestamp.with.time.zone,.timestamp.with.time.zone,.integer.FUNCTION.sql
 api.set_active.text,.boolean.FUNCTION.sql
 api.set_offline_ok.text,.boolean.FUNCTION.sql
@@ -315,6 +316,7 @@ api.FUNCTION.review_decide.id.bigint,.decision.text,.note.text.ACL.sql
 api.FUNCTION.review_done.id.bigint,.status.text,.sha.text,.note.text.ACL.sql
 api.FUNCTION.review_submit.repo.text,.branch.text,.diff.text,.title.text,.base.text,.description.text,.head_sha.text,.base_sha.text,.compare_url.text,.task.text,.note.text,.remote.text.ACL.sql
 api.FUNCTION.review_text.id.bigint,.mine.boolean,.include_closed.boolean.ACL.sql
+api.FUNCTION.rotate_my_token.ACL.sql
 api.FUNCTION.search.q.text,.sender.text,.recipient.text,.tag.text,.system.text,.since.timestamp.with.time.zone,.until.timestamp.with.time.zone,.lim.integer.ACL.sql
 api.FUNCTION.set_active.handle.text,.active.boolean.ACL.sql
 api.FUNCTION.set_offline_ok.handle.text,.offline_ok.boolean.ACL.sql

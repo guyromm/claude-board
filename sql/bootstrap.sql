@@ -2569,6 +2569,18 @@ BEGIN
     RETURN json_build_object('handle', reissue_token.handle, 'token', board.token_for(reissue_token.handle));
 END $$;
 
+-- an agent revokes all of its own tokens and gets a fresh one (doc:service-credentials, #308/8): the new token goes
+-- straight back to the caller over HTTPS, so no secret moves through anyone else
+CREATE OR REPLACE FUNCTION api.rotate_my_token() RETURNS json
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = board, public AS $$
+DECLARE h text := board.require_me();
+BEGIN
+    UPDATE board.agent a SET token_version = a.token_version + 1, updated_at = now()
+    WHERE a.handle = h AND a.kind = 'agent';
+    IF NOT FOUND THEN RAISE EXCEPTION 'only agents rotate their token'; END IF;
+    RETURN json_build_object('handle', h, 'token', board.token_for(h));
+END $$;
+
 -- ---------------------------------------------------------------- Needs you: urgency levels
 -- a task that starts needing the human again starts at "soon" unless its level was set in the same statement
 CREATE OR REPLACE FUNCTION board.task_level_reset() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -2796,7 +2808,7 @@ GRANT EXECUTE ON FUNCTION api.update_profile(text, text, text, text, text, text,
                           api.system_instance(text, text, text, boolean), api.project_system(bigint, text, text, boolean),
                           api.client_save(text, text, text, text), api.project_client(bigint, text, text, boolean)
       TO board_agent, board_admin;
-GRANT EXECUTE ON FUNCTION api.task_urgency(bigint, text, text), api.activity_push(text), api.activity_load(timestamptz, timestamptz, text, text),
+GRANT EXECUTE ON FUNCTION api.rotate_my_token(), api.task_urgency(bigint, text, text), api.activity_push(text), api.activity_load(timestamptz, timestamptz, text, text),
                           api.activity_periods(timestamptz, timestamptz, text)
       TO board_agent, board_admin;
 GRANT EXECUTE ON FUNCTION api.create_invite(text, integer, integer), api.set_active(text, boolean), api.set_offline_ok(text, boolean),
