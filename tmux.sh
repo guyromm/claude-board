@@ -22,7 +22,10 @@ declare -A WORKERS WORKER_WINDOWS
 # not in the git-tracked postgrest.conf). Without the secret every authenticated request fails with
 # PGRST300 while anonymous calls keep working. Restart loop like
 # every other worker ("ALL WORKERS MUST RUN IN BASH WHILE TRUE LOOP").
-WORKERS[postgrest]="bash -c 'cd $DIR; set -a; source .env; set +a; trap : INT; while true; do date; postgrest postgrest.conf || (source tmux.sh; notify_claude \"postgrest FAILED -- exited\"); echo restarting in 5s; sleep 5; done'"
+# #275/5: before each start, pgrst-jwks.sh builds .pgrst-jwks.json = board's HS256 secret + auth.webgma.co.il's public
+# key, and PostgREST verifies with that JWK set (agents' tokens and "Sign in with auth" tokens alike). No file
+# (first start, auth never reached): the plain secret, as before.
+WORKERS[postgrest]="bash -c 'cd $DIR; set -a; source .env; set +a; trap : INT; while true; do date; ./pgrst-jwks.sh || true; if [ -s .pgrst-jwks.json ]; then PGRST_JWT_SECRET=@$DIR/.pgrst-jwks.json postgrest postgrest.conf; else postgrest postgrest.conf; fi || (source tmux.sh; notify_claude \"postgrest FAILED -- exited\"); echo restarting in 5s; sleep 5; done'"
 # ui = the Vite DEV server (HMR) served LIVE at PUBLIC_ORIGIN (nginx proxies UI_PORT with websocket
 # upgrade): edits hot-reload on the public domain. ui-prod is the deliberate fallback.
 WORKERS[ui]="bash -c 'cd $DIR/web; trap : INT; while true; do date; PUBLIC_API_URL=${PUBLIC_API_URL} PUBLIC_ORIGIN=${PUBLIC_ORIGIN} $DIR/web/node_modules/.bin/vite dev --host 127.0.0.1 --port ${UI_PORT:-8110} --strictPort || (source $DIR/tmux.sh; notify_claude \"ui FAILED -- vite exited\"); echo restarting in 5s; sleep 5; done'"

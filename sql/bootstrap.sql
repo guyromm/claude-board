@@ -529,8 +529,21 @@ CREATE OR REPLACE TRIGGER message_human_answered AFTER INSERT ON board.message
     FOR EACH ROW EXECUTE FUNCTION board.message_human_answered();
 
 -- handle of the caller, from the verified JWT (NULL for anonymous)
+-- Two token kinds (PostgREST verifies both signatures: board's HS256 secret + auth's RS256 key, doc:auth-integration):
+--  * board's own tokens (agents): the 'handle' claim, checked against token_version in api.pre_request;
+--  * auth.webgma.co.il tokens (humans, #275/5): iss = auth, aud = board. AUTHORIZATION is auth's grant, carried in
+--    'role' (board_admin); never a hardcoded sub. IDENTITY maps the person's auth username (preferred_username) to
+--    the active human board.agent row of the same handle, so messages and tasks keep a sender. No grant (another
+--    role, another aud) = no identity = anonymous.
+CREATE OR REPLACE FUNCTION board.auth_handle(c json) RETURNS text
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = board, public AS $$
+    SELECT a.handle FROM board.agent a
+    WHERE c ->> 'iss' = 'https://auth.webgma.co.il' AND c ->> 'aud' = 'board' AND c ->> 'role' = 'board_admin'
+      AND a.handle = lower(c ->> 'preferred_username') AND a.kind = 'human' AND a.active
+$$;
 CREATE OR REPLACE FUNCTION board.me() RETURNS text LANGUAGE sql STABLE AS $$
-    SELECT nullif(current_setting('request.jwt.claims', true), '')::json ->> 'handle'
+    SELECT CASE WHEN c ->> 'iss' = 'https://auth.webgma.co.il' THEN board.auth_handle(c) ELSE c ->> 'handle' END
+    FROM (SELECT nullif(current_setting('request.jwt.claims', true), '')::json AS c) x
 $$;
 
 CREATE OR REPLACE FUNCTION board.require_me() RETURNS text LANGUAGE plpgsql STABLE AS $$
@@ -540,11 +553,18 @@ BEGIN
     RETURN h;
 END $$;
 
+-- the caller signed in through auth.webgma.co.il with board's admin grant (see board.me)
+CREATE OR REPLACE FUNCTION board.via_auth() RETURNS boolean LANGUAGE sql STABLE AS $$
+    SELECT coalesce(nullif(current_setting('request.jwt.claims', true), '')::json ->> 'iss' = 'https://auth.webgma.co.il'
+                    AND board.me() IS NOT NULL, false)
+$$;
+
 CREATE OR REPLACE FUNCTION board.require_admin() RETURNS text
 LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = board, public AS $$
 DECLARE h text := board.require_me();
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM agent WHERE handle = h AND is_admin AND active) THEN
+    -- an auth token has an identity only with auth's board_admin grant (board.auth_handle), so it is admin
+    IF NOT (board.via_auth() OR EXISTS (SELECT 1 FROM agent WHERE handle = h AND is_admin AND active)) THEN
         RAISE EXCEPTION 'admin only' USING ERRCODE = '42501';
     END IF;
     RETURN h;
@@ -553,7 +573,7 @@ END $$;
 -- the caller is an active admin (non-raising); also claude-ui's default admin predicate (/claude)
 CREATE OR REPLACE FUNCTION board.is_admin() RETURNS boolean
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = board, public AS $$
-    SELECT EXISTS (SELECT 1 FROM agent WHERE handle = board.me() AND is_admin AND active)
+    SELECT board.via_auth() OR EXISTS (SELECT 1 FROM agent WHERE handle = board.me() AND is_admin AND active)
 $$;
 
 -- 'a, b c' / '{a,b}' / '@a @b' -> {a,b}: lowercased, trimmed, deduped, order kept
@@ -637,6 +657,14 @@ CREATE OR REPLACE FUNCTION api.pre_request() RETURNS void
 LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = board, public AS $$
 DECLARE c json := nullif(current_setting('request.jwt.claims', true), '')::json;
 BEGIN
+    -- auth.webgma.co.il token: only for board, with board's grant, for an active human (board.auth_handle)
+    IF c ->> 'iss' = 'https://auth.webgma.co.il' THEN
+        IF board.auth_handle(c) IS NULL THEN
+            RAISE EXCEPTION 'no board access for this auth.webgma.co.il sign-in' USING ERRCODE = '28000',
+                HINT = 'ask guy for a board grant at auth.webgma.co.il';
+        END IF;
+        RETURN;
+    END IF;
     IF c IS NULL OR c ->> 'handle' IS NULL THEN RETURN; END IF;   -- anonymous
     IF NOT EXISTS (SELECT 1 FROM agent a WHERE a.handle = c ->> 'handle' AND a.active
                    AND a.token_version = (c ->> 'tv')::int) THEN
@@ -1351,9 +1379,11 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = board, public AS $$
     WHERE board.require_me() IS NOT NULL
 $$;
 
+-- is_admin is the CALLER's admin right (an auth sign-in: auth's grant), not just the row's flag
 CREATE OR REPLACE FUNCTION api.whoami() RETURNS json
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = board, public AS $$
-    SELECT row_to_json(x) FROM api.agents x WHERE x.handle = board.require_me()
+    SELECT (to_jsonb(x) || jsonb_build_object('is_admin', board.is_admin(), 'via_auth', board.via_auth()))::json
+    FROM api.agents x WHERE x.handle = board.require_me()
 $$;
 
 -- ---------------------------------------------------------------- API: tasks
@@ -2818,7 +2848,7 @@ GRANT EXECUTE ON FUNCTION api.create_invite(text, integer, integer), api.set_act
 -- api.messages evaluates board.me() for my_read_at/to_me; function EXECUTE is checked against the
 -- caller, so the API roles need it (it only reads the JWT claims; no table privileges come with this)
 GRANT USAGE ON SCHEMA board TO board_anon, board_agent, board_admin;
-GRANT EXECUTE ON FUNCTION board.me(), board.require_me(), board.is_admin() TO board_anon, board_agent, board_admin;
+GRANT EXECUTE ON FUNCTION board.me(), board.require_me(), board.is_admin(), board.via_auth(), board.auth_handle(json) TO board_anon, board_agent, board_admin;
 GRANT EXECUTE ON FUNCTION board.task_project(bigint) TO board_agent, board_admin;  -- used by api.tasks / api.projects
 
 NOTIFY pgrst, 'reload schema';

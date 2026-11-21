@@ -3,7 +3,7 @@
 	import { page } from '$app/state';
 	import { goto, afterNavigate } from '$app/navigation';
 	import { head, sectionTitle } from '#lib/title.svelte.ts';
-	import { API, api, ago, session, setSession, sessionBlocked, watcherSilent, SESSION_PROBLEM } from '#lib/api.svelte.ts';
+	import { API, api, ago, session, signOut, sessionBlocked, watcherSilent, SESSION_PROBLEM } from '#lib/api.svelte.ts';
 	import { every, REFRESH_MS } from '#lib/poll.ts';
 	import { push, pushSupported, pushRefresh, pushEnable, pushDisable } from '#lib/push.svelte.ts';
 	import ClaudeDock from '../../../claude-ui/web/ClaudeDock.svelte';
@@ -105,7 +105,7 @@
 					{#if push.error}<small class="perr">{push.error}</small>{/if}
 				{/if}
 				<span>{session.current.handle}</span>
-				<button class="link" onclick={() => setSession(null)}>Sign out</button>
+				<button class="link" onclick={() => signOut()}>Sign out</button>
 			</div>
 		{/if}
 	</div>

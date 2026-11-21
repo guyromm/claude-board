@@ -7,7 +7,8 @@ export const API =
 
 const KEY = 'board.session';
 
-type Session = { handle: string; token: string; is_admin: boolean } | null;
+// via 'auth': signed in through auth.webgma.co.il (#275/5); the token comes from /auth/token and is renewed by syncAuth
+type Session = { handle: string; token: string; is_admin: boolean; via?: 'auth' } | null;
 
 function load(): Session {
 	try {
@@ -27,6 +28,40 @@ export function setSession(s: Session) {
 	session.current = s;
 	if (s) localStorage.setItem(KEY, JSON.stringify(s));
 	else localStorage.removeItem(KEY);
+}
+
+// "Sign in with auth.webgma.co.il": the server keeps auth's cookies; /auth/token gives the current 15-min token,
+// whoami maps it to a board handle (auth's board_admin grant -> the human row of the same username). Awaited by the
+// root layout before any page redirects to /login, and repeated every 10 min. An old password session is left alone.
+let authTimer: ReturnType<typeof setInterval> | undefined;
+export async function syncAuth(): Promise<void> {
+	authTimer ??= setInterval(() => void syncAuth(), 10 * 60 * 1000);
+	if (session.current && !session.current.via) return;
+	try {
+		const r = await fetch('/auth/token', { cache: 'no-store' });
+		const token: string | null = r.ok ? (await r.json()).token : null;
+		if (!token) {
+			if (session.current?.via === 'auth') setSession(null);
+			return;
+		}
+		const w = await fetch(API + '/rpc/whoami', { headers: { Accept: 'application/json', Authorization: `Bearer ${token}` } });
+		if (!w.ok) {
+			if (session.current?.via === 'auth') setSession(null);
+			return;
+		}
+		const me = await w.json();
+		setSession({ handle: me.handle, token, is_admin: !!me.is_admin, via: 'auth' });
+	} catch {
+		/* network hiccup: keep the current session, retry on the next tick */
+	}
+}
+
+// signing out of an auth session drops board's auth cookies too (auth.webgma.co.il itself stays signed in)
+export async function signOut() {
+	const via = session.current?.via;
+	setSession(null);
+	// JSON body: SvelteKit's CSRF origin check only gates form posts, and this POST is same-origin anyway
+	if (via === 'auth') await fetch('/auth/logout', { method: 'POST', redirect: 'manual', headers: { 'Content-Type': 'application/json' }, body: '{}' }).catch(() => {});
 }
 
 export class ApiError extends Error {

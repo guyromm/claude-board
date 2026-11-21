@@ -7,6 +7,7 @@
 !/tmux.sh
 !/backup.sh
 !/idle-nudge.sh
+!/pgrst-jwks.sh
 !/infra-recovery-sync.sh
 !/nginx.conf.in
 !/LICENSE
