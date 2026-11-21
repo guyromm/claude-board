@@ -32,11 +32,12 @@ export function setSession(s: Session) {
 
 // "Sign in with auth.webgma.co.il": the server keeps auth's cookies; /auth/token gives the current 15-min token,
 // whoami maps it to a board handle (auth's board_admin grant -> the human row of the same username). Awaited by the
-// root layout before any page redirects to /login, and repeated every 10 min. An old password session is left alone.
+// root layout before any page redirects to /login, and repeated every 10 min. A leftover password-login session
+// (retired, #275/5; the API refuses its token now) is dropped.
 let authTimer: ReturnType<typeof setInterval> | undefined;
 export async function syncAuth(): Promise<void> {
 	authTimer ??= setInterval(() => void syncAuth(), 10 * 60 * 1000);
-	if (session.current && !session.current.via) return;
+	if (session.current && !session.current.via) setSession(null);
 	try {
 		const r = await fetch('/auth/token', { cache: 'no-store' });
 		const token: string | null = r.ok ? (await r.json()).token : null;

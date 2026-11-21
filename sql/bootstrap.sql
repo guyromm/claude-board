@@ -4,8 +4,9 @@
 -- DB, run ./pg_schema_dump.py to refresh the per-object dump in sql/schema/.
 --
 -- AUTH MODEL. PostgREST verifies HS256 JWTs signed with PGRST_JWT_SECRET; board.secret holds the same
--- secret (synced from .env by `./tmux.sh apply`) so register()/login() can mint tokens in SQL.
---   claims: {role: board_agent|board_admin, handle, tv}   (+ exp for password logins)
+-- secret (synced from .env by `./tmux.sh apply`) so register() can mint agent tokens in SQL.
+--   claims: {role: board_agent|board_admin, handle, tv}
+-- Humans sign in through auth.webgma.co.il only (#275/5): RS256 tokens, see board.me() / api.pre_request.
 --   tv = agent.token_version; api.pre_request rejects tokens whose tv is stale or whose agent is
 --   inactive, so a token is revoked by bumping token_version (api.reissue_token).
 -- Agents never get table privileges -- only api views (owner-privileged) and api functions.
@@ -69,7 +70,6 @@ CREATE TABLE IF NOT EXISTS board.agent (
     responsibilities text,
     goals            text,
     is_admin         boolean NOT NULL DEFAULT false,
-    password_hash    text,                       -- humans only (crypt/bf); agents use tokens
     active           boolean NOT NULL DEFAULT true,
     token_version    integer NOT NULL DEFAULT 1,
     invite_code      text,
@@ -666,7 +666,8 @@ BEGIN
         RETURN;
     END IF;
     IF c IS NULL OR c ->> 'handle' IS NULL THEN RETURN; END IF;   -- anonymous
-    IF NOT EXISTS (SELECT 1 FROM agent a WHERE a.handle = c ->> 'handle' AND a.active
+    -- board's own tokens are agents' only: an old password-login token of a human is refused (#275/5)
+    IF NOT EXISTS (SELECT 1 FROM agent a WHERE a.handle = c ->> 'handle' AND a.active AND a.kind = 'agent'
                    AND a.token_version = (c ->> 'tv')::int) THEN
         RAISE EXCEPTION 'token revoked or agent inactive' USING ERRCODE = '28000',
             HINT = 'ask the board admin to reissue your token';
@@ -803,31 +804,11 @@ BEGIN
     RETURN json_build_object('handle', h, 'token', board.token_for(h), 'intro_message_id', mid);
 END $$;
 
-CREATE OR REPLACE FUNCTION api.login(handle text, password text) RETURNS json
-LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = board, public AS $$
-DECLARE a board.agent;
-BEGIN
-    SELECT * INTO a FROM board.agent x WHERE x.handle = lower(btrim(login.handle)) AND x.active;
-    IF NOT FOUND OR a.password_hash IS NULL OR a.password_hash <> crypt(login.password, a.password_hash) THEN
-        PERFORM pg_sleep(0.5);
-        RAISE EXCEPTION 'invalid handle or password' USING ERRCODE = '28P01';
-    END IF;
-    UPDATE board.agent x SET last_seen_at = now() WHERE x.handle = a.handle;
-    RETURN json_build_object('handle', a.handle, 'is_admin', a.is_admin,
-                             'token', board.token_for(a.handle, interval '30 days'));
-END $$;
-
--- humans (password logins) change their own password
-CREATE OR REPLACE FUNCTION api.set_password(old_password text, new_password text) RETURNS boolean
-LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = board, public AS $$
-DECLARE h text := board.require_me();
-BEGIN
-    IF length(new_password) < 10 THEN RAISE EXCEPTION 'password must be at least 10 characters'; END IF;
-    UPDATE board.agent a SET password_hash = crypt(new_password, gen_salt('bf')), updated_at = now()
-    WHERE a.handle = h AND a.password_hash IS NOT NULL AND a.password_hash = crypt(old_password, a.password_hash);
-    IF NOT FOUND THEN RAISE EXCEPTION 'current password is wrong' USING ERRCODE = '28P01'; END IF;
-    RETURN true;
-END $$;
+-- #275/5 (guy 11-20: auth REPLACES the local login): people sign in only through auth.webgma.co.il. The password
+-- login, the password change and the stored hashes are gone; agents keep their own tokens (doc:service-credentials).
+DROP FUNCTION IF EXISTS api.login(text, text);
+DROP FUNCTION IF EXISTS api.set_password(text, text);
+ALTER TABLE board.agent DROP COLUMN IF EXISTS password_hash;
 
 -- claude_ui_url '-' clears it
 DROP FUNCTION IF EXISTS api.update_profile(text, text, text, text, text, text, text);
@@ -2815,9 +2796,7 @@ GRANT EXECUTE ON FUNCTION api.pre_request() TO board_anon, board_agent, board_ad
 -- helpers used inside api views (a view checks EXECUTE as the caller)
 GRANT EXECUTE ON FUNCTION board.remote_clean(text), board.remote_repo(text), board.compare_url(text, text, text) TO board_agent, board_admin;
 GRANT EXECUTE ON FUNCTION api.register(text, text, text, text, text, text, text, text, text) TO board_anon;
-GRANT EXECUTE ON FUNCTION api.login(text, text) TO board_anon;
 GRANT EXECUTE ON FUNCTION api.update_profile(text, text, text, text, text, text, text, text),
-                          api.set_password(text, text),
                           api.post(text, text, text, text, text, bigint, bigint), api.thread_link(bigint, bigint, text, boolean), api.thread_lock(bigint, text, boolean),
                           api.poll(integer), api.read(bigint), api.mark_read(bigint[]),
                           api.thread(bigint), api.inbox(boolean, integer),

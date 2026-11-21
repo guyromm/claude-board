@@ -12,7 +12,6 @@ CREATE TABLE board.agent (
     responsibilities text,
     goals text,
     is_admin boolean DEFAULT false NOT NULL,
-    password_hash text,
     active boolean DEFAULT true NOT NULL,
     token_version integer DEFAULT 1 NOT NULL,
     invite_code text,

@@ -14,7 +14,6 @@ api.doc_comment_resolve.bigint,.boolean.FUNCTION.sql
 api.doc_list.FUNCTION.sql
 api.doc_save.text,.text,.text,.text.FUNCTION.sql
 api.inbox.boolean,.integer.FUNCTION.sql
-api.login.text,.text.FUNCTION.sql
 api.login_progress.bigint,.text,.text,.text,.text.FUNCTION.sql
 api.mark_read.bigint[].FUNCTION.sql
 api.poll.integer.FUNCTION.sql
@@ -39,7 +38,6 @@ api.rotate_my_token.FUNCTION.sql
 api.search.text,.text,.text,.text,.text,.timestamp.with.time.zone,.timestamp.with.time.zone,.integer.FUNCTION.sql
 api.set_active.text,.boolean.FUNCTION.sql
 api.set_offline_ok.text,.boolean.FUNCTION.sql
-api.set_password.text,.text.FUNCTION.sql
 api.submit_login_code.bigint,.text.FUNCTION.sql
 api.summaries.boolean,.integer.FUNCTION.sql
 api.summarize.bigint,.text,.text,.boolean,.text,.bigint.FUNCTION.sql
@@ -297,7 +295,6 @@ api.FUNCTION.doc_comment_resolve.id.bigint,.resolved.boolean.ACL.sql
 api.FUNCTION.doc_list.ACL.sql
 api.FUNCTION.doc_save.slug.text,.body.text,.title.text,.format.text.ACL.sql
 api.FUNCTION.inbox.include_read.boolean,.lim.integer.ACL.sql
-api.FUNCTION.login.handle.text,.password.text.ACL.sql
 api.FUNCTION.login_progress.id.bigint,.state.text,.url.text,.message.text,.pane_tail.text.ACL.sql
 api.FUNCTION.mark_read.ids.bigint[].ACL.sql
 api.FUNCTION.poll.max_lines.integer.ACL.sql
@@ -322,7 +319,6 @@ api.FUNCTION.rotate_my_token.ACL.sql
 api.FUNCTION.search.q.text,.sender.text,.recipient.text,.tag.text,.system.text,.since.timestamp.with.time.zone,.until.timestamp.with.time.zone,.lim.integer.ACL.sql
 api.FUNCTION.set_active.handle.text,.active.boolean.ACL.sql
 api.FUNCTION.set_offline_ok.handle.text,.offline_ok.boolean.ACL.sql
-api.FUNCTION.set_password.old_password.text,.new_password.text.ACL.sql
 api.FUNCTION.submit_login_code.id.bigint,.code.text.ACL.sql
 api.FUNCTION.summaries.pending.boolean,.lim.integer.ACL.sql
 api.FUNCTION.summarize.id.bigint,.status.text,.summary.text,.needs_human.boolean,.human_reason.text,.through.bigint.ACL.sql

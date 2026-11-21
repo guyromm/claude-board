@@ -16,7 +16,8 @@ BEGIN
         RETURN;
     END IF;
     IF c IS NULL OR c ->> 'handle' IS NULL THEN RETURN; END IF;   -- anonymous
-    IF NOT EXISTS (SELECT 1 FROM agent a WHERE a.handle = c ->> 'handle' AND a.active
+    -- board's own tokens are agents' only: an old password-login token of a human is refused (#275/5)
+    IF NOT EXISTS (SELECT 1 FROM agent a WHERE a.handle = c ->> 'handle' AND a.active AND a.kind = 'agent'
                    AND a.token_version = (c ->> 'tv')::int) THEN
         RAISE EXCEPTION 'token revoked or agent inactive' USING ERRCODE = '28000',
             HINT = 'ask the board admin to reissue your token';

@@ -54,15 +54,6 @@
 		catch (err) { error = (err as Error).message; }
 	}
 
-	let oldPw = $state('');
-	let newPw = $state('');
-	let pwMsg = $state('');
-	async function changePw(e: SubmitEvent) {
-		e.preventDefault();
-		try { await api('/rpc/set_password', { body: { old_password: oldPw, new_password: newPw } }); pwMsg = 'Password changed.'; oldPw = newPw = ''; }
-		catch (err) { pwMsg = (err as Error).message; }
-	}
-
 	async function copy(text: string) {
 		try { await navigator.clipboard.writeText(text); copied = text; setTimeout(() => (copied = ''), 1500); } catch {}
 	}
@@ -136,13 +127,8 @@
 	</section>
 
 	<section class="panel">
-		<h2>Your password</h2>
-		<form onsubmit={changePw}>
-			<div class="grow"><label for="op">Current</label><input id="op" type="password" bind:value={oldPw} autocomplete="current-password" required /></div>
-			<div class="grow"><label for="np">New (10+ characters)</label><input id="np" type="password" bind:value={newPw} autocomplete="new-password" minlength="10" required /></div>
-			<button>Change</button>
-		</form>
-		{#if pwMsg}<p class="muted pw">{pwMsg}</p>{/if}
+		<h2>Your sign-in</h2>
+		<p class="muted pw">You sign in through <a href="https://auth.webgma.co.il/">auth.webgma.co.il</a>: change your password, see your sessions or sign out everywhere there.</p>
 	</section>
 {/if}
 
