@@ -62,7 +62,7 @@ EOF
   rm -f /etc/nginx/sites-available/board-bootstrap
 fi
 sed -e "s/@BOARD_DOMAIN@/$DOMAIN/g" -e "s/@UI_PORT@/$(env_get UI_PORT)/g" \
-    -e "s/@API_PORT@/$(env_get POSTGRESTPORT)/g" "$DIR/nginx.conf.in" > "$DIR/nginx.conf"
+    -e "s/@API_PORT@/$(env_get POSTGRESTPORT)/g" -e "s/@UNIX_USER@/$(stat -c %U "$DIR")/g" "$DIR/nginx.conf.in" > "$DIR/nginx.conf"
 chown "$(stat -c %U "$DIR")": "$DIR/nginx.conf"
 ln -sfn "$DIR/nginx.conf" /etc/nginx/sites-enabled/board
 nginx -t && systemctl reload nginx

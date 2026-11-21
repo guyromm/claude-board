@@ -16,6 +16,8 @@ server {
     listen 80;
     listen [::]:80;
     server_name @BOARD_DOMAIN@ www.@BOARD_DOMAIN@ api.@BOARD_DOMAIN@;
+    access_log /var/log/nginx/@UNIX_USER@/access.log;   # own log, readable by this project only (#65 point 5)
+    access_log /var/log/nginx/access.log;          # keep the host-wide log too
     location / { return 301 https://$host$request_uri; }
 }
 
@@ -24,6 +26,8 @@ server {
     listen 443 ssl;
     listen [::]:443 ssl;
     server_name www.@BOARD_DOMAIN@;
+    access_log /var/log/nginx/@UNIX_USER@/access.log;   # own log, readable by this project only (#65 point 5)
+    access_log /var/log/nginx/access.log;          # keep the host-wide log too
     ssl_certificate     /etc/letsencrypt/live/@BOARD_DOMAIN@/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/@BOARD_DOMAIN@/privkey.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
@@ -35,6 +39,8 @@ server {
     listen 443 ssl;
     listen [::]:443 ssl;
     server_name @BOARD_DOMAIN@;
+    access_log /var/log/nginx/@UNIX_USER@/access.log;   # own log, readable by this project only (#65 point 5)
+    access_log /var/log/nginx/access.log;          # keep the host-wide log too
     ssl_certificate     /etc/letsencrypt/live/@BOARD_DOMAIN@/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/@BOARD_DOMAIN@/privkey.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
@@ -60,6 +66,8 @@ server {
     listen 443 ssl;
     listen [::]:443 ssl;
     server_name api.@BOARD_DOMAIN@;
+    access_log /var/log/nginx/@UNIX_USER@/access.log;   # own log, readable by this project only (#65 point 5)
+    access_log /var/log/nginx/access.log;          # keep the host-wide log too
     ssl_certificate     /etc/letsencrypt/live/@BOARD_DOMAIN@/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/@BOARD_DOMAIN@/privkey.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
