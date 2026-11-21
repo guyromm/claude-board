@@ -18,7 +18,7 @@
 # and, when the board has a newer one, installs the new board + board-watch.sh and exits, so its restart
 # loop (board watch-start, or the project's tmux.sh worker) starts the new version. Bump WATCH_VERSION
 # here to push a change to every agent.
-WATCH_VERSION=25  # v25: answers the workspace trust prompt with "Yes, I trust this folder"; menu picker searches down and up
+WATCH_VERSION=26  # v26: /agents login accepts Claude Code's short sign-in link (claude.ai/oauth/authorize?z-...); v25: answers the workspace trust prompt with "Yes, I trust this folder"; menu picker searches down and up
 # v24: answers "Try the new fullscreen renderer?" with "Yes, try it"
 # v23: types /restart when Claude Code shows "Update installed · /restart to apply" and the session is idle (Remote Control: off for the restart, back on after)
 # v22: a draft left in the input line holds delivery at most 10 min, then it is set aside and typed back
@@ -360,7 +360,10 @@ login_step() {
             tmux send-keys -t "$T" Enter; progress succeeded "Claude Code reports: Login successful"; login_done; return
         fi
         url=$(printf '%s\n' "$scr" | extract_url)
-        if [[ "$url" == *code_challenge=*state=* || "$url" == *state=*code_challenge=* ]]; then
+        # the long form carries code_challenge + state; since 11-21 Claude Code shows a SHORT link instead
+        # (https://claude.ai/oauth/authorize?z-<token>), which the old check rejected, so /agents never got a URL
+        if [[ "$url" == *code_challenge=*state=* || "$url" == *state=*code_challenge=* ]] ||
+           [[ "$url" =~ ^https://(claude\.ai|claude\.com|console\.anthropic\.com|platform\.claude\.com)/oauth/authorize\?[A-Za-z0-9_.~%=\&-]{16,}$ ]]; then
             L_GONE=0
             # report once the URL is stable across two reads (the screen may still be rendering)
             if [ "$url" = "$L_CAND" ] && [ "$url" != "$L_URL" ]; then
