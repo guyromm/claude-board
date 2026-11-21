@@ -25,6 +25,7 @@ api.push_key.FUNCTION.sql
 api.push_subscribe.text,.text,.text,.text.FUNCTION.sql
 api.push_unsubscribe.text.FUNCTION.sql
 api.read.bigint.FUNCTION.sql
+api.refresh_my_token.FUNCTION.sql
 api.register.text,.text,.text,.text,.text,.text,.text,.text,.text.FUNCTION.sql
 api.reissue_token.text.FUNCTION.sql
 api.request_login.text.FUNCTION.sql
@@ -98,10 +99,12 @@ board.task_ref.bigint.FUNCTION.sql
 board.task_resolve.text.FUNCTION.sql
 board.task_status.text.FUNCTION.sql
 board.thread_summary_versioned.FUNCTION.sql
-board.token_for.text,.interval.FUNCTION.sql
+board.token_for.text,.text,.text,.interval.FUNCTION.sql
 board.via_auth.FUNCTION.sql
-board.activity_minute.TABLE.sql
 board.agent.TABLE.sql
+board.agent_token.TABLE.sql
+api.agent_tokens.VIEW.sql
+board.activity_minute.TABLE.sql
 board.recipient.TABLE.sql
 board.task_note.TABLE.sql
 api.agents.VIEW.sql
@@ -167,6 +170,7 @@ board.thread_summary_version_id_seq.SEQUENCE.OWNED.BY.sql
 board.thread_summary_version.id.DEFAULT.sql
 board.activity_minute.activity_minute_pkey.CONSTRAINT.sql
 board.agent.agent_pkey.CONSTRAINT.sql
+board.agent_token.agent_token_pkey.CONSTRAINT.sql
 board.client.client_pkey.CONSTRAINT.sql
 board.doc_comment.doc_comment_pkey.CONSTRAINT.sql
 board.doc.doc_pkey.CONSTRAINT.sql
@@ -198,6 +202,7 @@ board.thread_lock.thread_lock_pkey.CONSTRAINT.sql
 board.thread_summary.thread_summary_pkey.CONSTRAINT.sql
 board.thread_summary_version.thread_summary_version_pkey.CONSTRAINT.sql
 board.activity_minute_minute_idx.INDEX.sql
+board.agent_token_handle.INDEX.sql
 board.doc_comment_doc.INDEX.sql
 board.login_request_handle_idx.INDEX.sql
 board.message_created_idx.INDEX.sql
@@ -227,6 +232,7 @@ board.task.task_path_ins.TRIGGER.sql
 board.task.task_path_move.TRIGGER.sql
 board.thread_summary.thread_summary_versioned.TRIGGER.sql
 board.activity_minute.activity_minute_handle_fkey.FK.CONSTRAINT.sql
+board.agent_token.agent_token_handle_fkey.FK.CONSTRAINT.sql
 board.doc_comment.doc_comment_author_fkey.FK.CONSTRAINT.sql
 board.doc_comment.doc_comment_doc_id_fkey.FK.CONSTRAINT.sql
 board.doc_comment.doc_comment_message_id_fkey.FK.CONSTRAINT.sql
@@ -306,6 +312,7 @@ api.FUNCTION.push_key.ACL.sql
 api.FUNCTION.push_subscribe.endpoint.text,.p256dh.text,.auth.text,.user_agent.text.ACL.sql
 api.FUNCTION.push_unsubscribe.endpoint.text.ACL.sql
 api.FUNCTION.read.id.bigint.ACL.sql
+api.FUNCTION.refresh_my_token.ACL.sql
 api.FUNCTION.register.invite.text,.handle.text,.system.text,.description.text,.responsibilities.text,.goals.text,.host.text,.tmux_target.text,.display_name.text.ACL.sql
 api.FUNCTION.reissue_token.handle.text.ACL.sql
 api.FUNCTION.request_login.handle.text.ACL.sql
@@ -377,8 +384,9 @@ board.FUNCTION.task_ref.id.bigint.ACL.sql
 board.FUNCTION.task_resolve.ref.text.ACL.sql
 board.FUNCTION.task_status.s.text.ACL.sql
 board.FUNCTION.thread_summary_versioned.ACL.sql
-board.FUNCTION.token_for.h.text,.ttl.interval.ACL.sql
+board.FUNCTION.token_for.h.text,.reason.text,.issued_by.text,.ttl.interval.ACL.sql
 board.FUNCTION.via_auth.ACL.sql
+api.TABLE.agent_tokens.ACL.sql
 api.TABLE.agents.ACL.sql
 api.TABLE.clients.ACL.sql
 api.TABLE.doc_comments.ACL.sql

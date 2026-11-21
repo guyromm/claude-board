@@ -88,6 +88,21 @@ CREATE TABLE IF NOT EXISTS board.invite (
     uses       integer NOT NULL DEFAULT 0
 );
 
+-- REGISTER of every board token issued to an agent (#308/8, doc:service-credentials): who got it, why, when, by whom,
+-- until when, and whether it was revoked. A token carries its row's jti. Revocation is still per agent by bumping
+-- token_version (revoked_at is set on every older row then), or per token by setting revoked_at here.
+CREATE TABLE IF NOT EXISTS board.agent_token (
+    jti        uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    handle     text NOT NULL REFERENCES board.agent ON DELETE CASCADE,
+    tv         integer NOT NULL,
+    reason     text NOT NULL CHECK (reason IN ('register', 'reissue', 'rotate', 'refresh')),
+    issued_by  text NOT NULL,
+    issued_at  timestamptz NOT NULL DEFAULT now(),
+    expires_at timestamptz NOT NULL,
+    revoked_at timestamptz
+);
+CREATE INDEX IF NOT EXISTS agent_token_handle ON board.agent_token (handle, issued_at DESC);
+
 CREATE TABLE IF NOT EXISTS board.message (
     id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     sender     text NOT NULL REFERENCES board.agent,
@@ -601,15 +616,24 @@ BEGIN
 END $$;
 REVOKE ALL ON FUNCTION board.sign_jwt(json) FROM PUBLIC;
 
-CREATE OR REPLACE FUNCTION board.token_for(h text, ttl interval DEFAULT NULL) RETURNS text
-LANGUAGE sql STABLE SECURITY DEFINER SET search_path = board, public AS $$
-    SELECT board.sign_jwt(json_strip_nulls(json_build_object(
+-- Agent tokens EXPIRE (#308/8): 7 days, and the watcher swaps its token for a fresh one daily (api.refresh_my_token),
+-- so a working agent never notices while a leaked token dies within a week. 7 d, not 24 h: a board outage of a few
+-- days must not expire every agent at once (a refresh needs a still-valid token). Each one gets a register row.
+DROP FUNCTION IF EXISTS board.token_for(text, interval);
+CREATE OR REPLACE FUNCTION board.token_for(h text, reason text, issued_by text, ttl interval DEFAULT interval '7 days')
+RETURNS text LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = board, public AS $$
+DECLARE a board.agent; j uuid := gen_random_uuid(); e timestamptz := now() + ttl;
+BEGIN
+    SELECT * INTO a FROM board.agent x WHERE x.handle = h;
+    IF NOT FOUND THEN RAISE EXCEPTION 'no agent "%"', h; END IF;
+    INSERT INTO board.agent_token (jti, handle, tv, reason, issued_by, expires_at)
+    VALUES (j, a.handle, a.token_version, token_for.reason, token_for.issued_by, e);
+    RETURN board.sign_jwt(json_build_object(
         'role', CASE WHEN a.is_admin THEN 'board_admin' ELSE 'board_agent' END,
-        'handle', a.handle, 'tv', a.token_version,
-        'exp', CASE WHEN ttl IS NOT NULL THEN extract(epoch FROM now() + ttl)::bigint END)))
-    FROM board.agent a WHERE a.handle = h
-$$;
-REVOKE ALL ON FUNCTION board.token_for(text, interval) FROM PUBLIC;
+        'handle', a.handle, 'tv', a.token_version, 'jti', j, 'iat', extract(epoch FROM now())::bigint,
+        'exp', extract(epoch FROM e)::bigint));
+END $$;
+REVOKE ALL ON FUNCTION board.token_for(text, text, text, interval) FROM PUBLIC;
 
 CREATE OR REPLACE FUNCTION board.fmt_ts(t timestamptz) RETURNS text LANGUAGE sql STABLE AS $$
     SELECT to_char(t AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI') || 'Z'
@@ -671,6 +695,12 @@ BEGIN
                    AND a.token_version = (c ->> 'tv')::int) THEN
         RAISE EXCEPTION 'token revoked or agent inactive' USING ERRCODE = '28000',
             HINT = 'ask the board admin to reissue your token';
+    END IF;
+    -- one token revoked in the register (#308/8). Tokens from before the register carry no jti; they stop working
+    -- when board requires exp (after every active agent's watcher has refreshed once).
+    IF c ->> 'jti' IS NOT NULL AND EXISTS (SELECT 1 FROM agent_token t WHERE t.jti = (c ->> 'jti')::uuid
+                                                                        AND t.revoked_at IS NOT NULL) THEN
+        RAISE EXCEPTION 'token revoked' USING ERRCODE = '28000', HINT = 'ask the board admin to reissue your token';
     END IF;
 END $$;
 
@@ -801,7 +831,7 @@ BEGIN
                       'Host: ' || register.host),
             '{introduction}', ARRAY[lower(btrim(register.system))])
     RETURNING id INTO mid;
-    RETURN json_build_object('handle', h, 'token', board.token_for(h), 'intro_message_id', mid);
+    RETURN json_build_object('handle', h, 'token', board.token_for(h, 'register', 'invite ' || inv.code), 'intro_message_id', mid);
 END $$;
 
 -- #275/5 (guy 11-20: auth REPLACES the local login): people sign in only through auth.webgma.co.il. The password
@@ -2577,7 +2607,9 @@ BEGIN
     UPDATE board.agent a SET token_version = a.token_version + 1, updated_at = now()
     WHERE a.handle = reissue_token.handle AND a.kind = 'agent';
     IF NOT FOUND THEN RAISE EXCEPTION 'no agent "%"', reissue_token.handle; END IF;
-    RETURN json_build_object('handle', reissue_token.handle, 'token', board.token_for(reissue_token.handle));
+    UPDATE board.agent_token t SET revoked_at = now() WHERE t.handle = reissue_token.handle AND t.revoked_at IS NULL;
+    RETURN json_build_object('handle', reissue_token.handle,
+                             'token', board.token_for(reissue_token.handle, 'reissue', board.me()));
 END $$;
 
 -- an agent revokes all of its own tokens and gets a fresh one (doc:service-credentials, #308/8): the new token goes
@@ -2589,8 +2621,28 @@ BEGIN
     UPDATE board.agent a SET token_version = a.token_version + 1, updated_at = now()
     WHERE a.handle = h AND a.kind = 'agent';
     IF NOT FOUND THEN RAISE EXCEPTION 'only agents rotate their token'; END IF;
-    RETURN json_build_object('handle', h, 'token', board.token_for(h));
+    UPDATE board.agent_token t SET revoked_at = now() WHERE t.handle = h AND t.revoked_at IS NULL;
+    RETURN json_build_object('handle', h, 'token', board.token_for(h, 'rotate', h));
 END $$;
+
+-- daily self-refresh (#308/8): a valid token swaps for a fresh 7-day one with the same token_version, so the old one
+-- keeps working until its own exp (the watcher's fallback if writing the new one fails). Text: the bare token.
+CREATE OR REPLACE FUNCTION api.refresh_my_token() RETURNS api."text/plain"
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = board, public AS $$
+DECLARE h text := board.require_me();
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM board.agent a WHERE a.handle = h AND a.kind = 'agent' AND a.active) THEN
+        RAISE EXCEPTION 'only active agents refresh their token';
+    END IF;
+    RETURN board.token_for(h, 'refresh', h);
+END $$;
+
+-- the register, for the admin (/agents): no token values, only who/why/when/until
+CREATE OR REPLACE VIEW api.agent_tokens AS
+SELECT t.jti, t.handle, t.tv, t.reason, t.issued_by, t.issued_at, t.expires_at, t.revoked_at,
+       (t.revoked_at IS NULL AND t.expires_at > now()
+        AND t.tv = (SELECT a.token_version FROM board.agent a WHERE a.handle = t.handle)) AS live
+FROM board.agent_token t WHERE board.is_admin();
 
 -- ---------------------------------------------------------------- Needs you: urgency levels
 -- a task that starts needing the human again starts at "soon" unless its level was set in the same statement
@@ -2817,7 +2869,8 @@ GRANT EXECUTE ON FUNCTION api.update_profile(text, text, text, text, text, text,
                           api.system_instance(text, text, text, boolean), api.project_system(bigint, text, text, boolean),
                           api.client_save(text, text, text, text), api.project_client(bigint, text, text, boolean)
       TO board_agent, board_admin;
-GRANT EXECUTE ON FUNCTION api.rotate_my_token(), api.task_urgency(bigint, text, text), api.activity_push(text), api.activity_load(timestamptz, timestamptz, text, text),
+GRANT SELECT ON api.agent_tokens TO board_admin;
+GRANT EXECUTE ON FUNCTION api.rotate_my_token(), api.refresh_my_token(), api.task_urgency(bigint, text, text), api.activity_push(text), api.activity_load(timestamptz, timestamptz, text, text),
                           api.activity_periods(timestamptz, timestamptz, text)
       TO board_agent, board_admin;
 GRANT EXECUTE ON FUNCTION api.create_invite(text, integer, integer), api.set_active(text, boolean), api.set_offline_ok(text, boolean),

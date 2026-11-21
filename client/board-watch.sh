@@ -18,7 +18,7 @@
 # and, when the board has a newer one, installs the new board + board-watch.sh and exits, so its restart
 # loop (board watch-start, or the project's tmux.sh worker) starts the new version. Bump WATCH_VERSION
 # here to push a change to every agent.
-WATCH_VERSION=26  # v26: /agents login accepts Claude Code's short sign-in link (claude.ai/oauth/authorize?z-...); v25: answers the workspace trust prompt with "Yes, I trust this folder"; menu picker searches down and up
+WATCH_VERSION=27  # v27: refreshes its board token daily (7-day tokens, api.refresh_my_token, #308/8); v26: /agents login accepts Claude Code's short sign-in link (claude.ai/oauth/authorize?z-...); v25: answers the workspace trust prompt with "Yes, I trust this folder"; menu picker searches down and up
 # v24: answers "Try the new fullscreen renderer?" with "Yes, try it"
 # v23: types /restart when Claude Code shows "Update installed · /restart to apply" and the session is idle (Remote Control: off for the restart, back on after)
 # v22: a draft left in the input line holds delivery at most 10 min, then it is set aside and typed back
@@ -441,6 +441,40 @@ check_upgrade() {
     exit 0
 }
 
+# ---------------------------------------------------------------- token refresh (#308/8)
+# Board tokens expire (7 days). Once an hour, if this agent's token has no exp (issued before 11-21) or less than
+# REFRESH_LEFT seconds left, swap it for a fresh one: api.refresh_my_token returns a new 7-day token with the same
+# token_version, so the OLD one stays valid until its own exp. Write it atomically (tmp + mv, mode 600), check it with
+# a real call, and put the old one back if the check fails. A broken refresh must never deafen the watcher.
+TOKEN_EVERY="${BOARD_TOKEN_EVERY:-3600}"
+REFRESH_LEFT="${BOARD_REFRESH_LEFT:-518400}"   # 6 days: a healthy watcher refreshes about once a day
+L_TOKCHECK=0
+token_exp() {  # exp claim of the token in file $1, or empty
+    local p; p=$(cut -d. -f2 < "$1" 2>/dev/null | tr '_-' '/+')
+    while [ $(( ${#p} % 4 )) -ne 0 ]; do p="$p="; done
+    printf '%s' "$p" | base64 -d 2>/dev/null | tr -d ' ' | sed -n 's/.*"exp":\([0-9][0-9]*\).*/\1/p'
+}
+check_token() {
+    local t e new tf="$BOARD_HOME/token"
+    t=$(now); [ $((t - L_TOKCHECK)) -ge "$TOKEN_EVERY" ] || return 0
+    L_TOKCHECK=$t
+    [ -z "$L_ID" ] || return 0                 # never in the middle of a login
+    e=$(token_exp "$tf")
+    [ -n "$e" ] && [ $((e - t)) -gt "$REFRESH_LEFT" ] && return 0
+    rpc refresh_my_token || { log "token refresh failed ($RPC_CODE): ${RPC_OUT:0:200}; keeping the current token"; return 0; }
+    new=$(printf '%s' "$RPC_OUT" | tr -d '"[:space:]')
+    if ! [[ "$new" =~ ^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$ ]]; then
+        log "token refresh returned no token; keeping the current token"; return 0
+    fi
+    ( umask 077; cp -p "$tf" "$tf.prev" && printf '%s\n' "$new" > "$tf.new" ) || { log "token refresh: can't write $tf.new"; return 0; }
+    mv -f "$tf.new" "$tf"
+    if rpc whoami; then
+        rm -f "$tf.prev"; log "token refreshed (expires $(date -u -d "@$(token_exp "$tf")" '+%F %H:%MZ' 2>/dev/null))"
+    else
+        mv -f "$tf.prev" "$tf"; log "token refresh: the new token failed a check ($RPC_CODE); restored the old one"
+    fi
+}
+
 # ---------------------------------------------------------------- model + Claude Code version
 # Read off the session's transcript: Claude Code writes ~/.claude/projects/<cwd, non-alphanumerics as "-">/<session>.jsonl,
 # where each line carries "version":"<Claude Code version>" and each assistant reply "model":"<model id>".
@@ -640,5 +674,6 @@ while true; do
     deliver
     maybe_restart
     check_upgrade
+    check_token
     if [ -n "$L_ID" ]; then sleep "$FAST"; else sleep "$POLL"; fi
 done

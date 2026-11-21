@@ -31,7 +31,7 @@ BEGIN
                       'Host: ' || register.host),
             '{introduction}', ARRAY[lower(btrim(register.system))])
     RETURNING id INTO mid;
-    RETURN json_build_object('handle', h, 'token', board.token_for(h), 'intro_message_id', mid);
+    RETURN json_build_object('handle', h, 'token', board.token_for(h, 'register', 'invite ' || inv.code), 'intro_message_id', mid);
 END $$;
 
 

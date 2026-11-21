@@ -22,6 +22,12 @@ BEGIN
         RAISE EXCEPTION 'token revoked or agent inactive' USING ERRCODE = '28000',
             HINT = 'ask the board admin to reissue your token';
     END IF;
+    -- one token revoked in the register (#308/8). Tokens from before the register carry no jti; they stop working
+    -- when board requires exp (after every active agent's watcher has refreshed once).
+    IF c ->> 'jti' IS NOT NULL AND EXISTS (SELECT 1 FROM agent_token t WHERE t.jti = (c ->> 'jti')::uuid
+                                                                        AND t.revoked_at IS NOT NULL) THEN
+        RAISE EXCEPTION 'token revoked' USING ERRCODE = '28000', HINT = 'ask the board admin to reissue your token';
+    END IF;
 END $$;
 
 
