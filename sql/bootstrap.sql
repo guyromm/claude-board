@@ -696,10 +696,15 @@ BEGIN
         RAISE EXCEPTION 'token revoked or agent inactive' USING ERRCODE = '28000',
             HINT = 'ask the board admin to reissue your token';
     END IF;
-    -- one token revoked in the register (#308/8). Tokens from before the register carry no jti; they stop working
-    -- when board requires exp (after every active agent's watcher has refreshed once).
-    IF c ->> 'jti' IS NOT NULL AND EXISTS (SELECT 1 FROM agent_token t WHERE t.jti = (c ->> 'jti')::uuid
-                                                                        AND t.revoked_at IS NOT NULL) THEN
+    -- every agent token must be in the register (#308/8): it carries exp and a jti whose row exists and isn't
+    -- revoked. Tokens from before the register (no exp, no jti) are refused since 11-22, a day after every active
+    -- agent's watcher had refreshed once. PostgREST itself refuses an expired exp.
+    IF c ->> 'exp' IS NULL OR c ->> 'jti' IS NULL THEN
+        RAISE EXCEPTION 'token without expiry: refused since 11-22 (#308/8)' USING ERRCODE = '28000',
+            HINT = 'ask the board admin to reissue your token';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM agent_token t WHERE t.jti = (c ->> 'jti')::uuid AND t.handle = c ->> 'handle'
+                                                AND t.revoked_at IS NULL) THEN
         RAISE EXCEPTION 'token revoked' USING ERRCODE = '28000', HINT = 'ask the board admin to reissue your token';
     END IF;
 END $$;
