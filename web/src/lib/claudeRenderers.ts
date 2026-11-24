@@ -1,5 +1,5 @@
 // claude-ui rendering plug-ins for the board (ClaudePage/ClaudeDock `renderers`): in the chat, "#119/3" and
-// "#119/" link to the task and "#1456" to the message, as in board text (links.ts). Hovering one shows its
+// "#119/" link to the task, "review #301" / "!301" to the code review and "#1456" to the message, as in board text (links.ts). Hovering one shows its
 // title, state and assignee, and whether it needs you (the escalation's first paragraph). The data is
 // fetched in batches as references render, and again on hover once it is a minute old.
 import { api } from '#lib/api.svelte.ts';
@@ -95,6 +95,9 @@ function link(text: string, href: string, key: string): HTMLElement {
 }
 
 export const boardRenderers = [
+	// code reviews: 'review #301' / 'reviews #301' or the short form !301 (before the bare #N rule)
+	{ pattern: /(?:\b[Rr]eviews?\s+#|(?<![\w!])!)(\d+)\b/g,
+	  render: (m: RegExpExecArray) => { const a = document.createElement('a'); a.textContent = m[0]; a.href = `/reviews/${m[1]}`; a.className = 'cui-ref'; return a; } },
 	// tasks first: "#119/3" or "#119/" (a top-level task); the same pattern as links.ts
 	{ pattern: /(?<![\w&])#(\d+(?:\/\d+)+|\d+\/)(?![\w#/])/g,
 	  render: (m: RegExpExecArray) => { const p = m[1].replace(/\/$/, ''); return link(m[0], `/tasks/${p}`, `t:${p}`); } },

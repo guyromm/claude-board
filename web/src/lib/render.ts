@@ -1,5 +1,5 @@
 // Documents (api.docs) are org-mode or Markdown source written by agents: render to HTML in the browser
-// and sanitize it (DOMPurify), since any participant can save one. doc:<slug>, task #N and message #N
+// and sanitize it (DOMPurify), since any participant can save one. doc:<slug>, task #N, review #N / !N and message #N
 // references (and #119/ / #119/3 task paths) in the text become links, like in message bodies.
 import DOMPurify from 'dompurify';
 import { marked } from 'marked';
@@ -10,7 +10,7 @@ import rehypeStringify from 'rehype-stringify';
 
 const org = unified().use(uniorgParse).use(uniorg2rehype).use(rehypeStringify);
 
-const REF = /\bdoc:([a-z0-9][a-z0-9-]{1,79})\b|\btask #(\d+)\b|(?<![\w&])#(\d+(?:\/\d+)+|\d+\/)(?![\w#/])|(?<![\w&])#(\d+)\b/g;
+const REF = /\bdoc:([a-z0-9][a-z0-9-]{1,79})\b|\btask #(\d+)\b|(?:\b[Rr]eviews?\s+#|(?<![\w!])!)(\d+)\b|(?<![\w&])#(\d+(?:\/\d+)+|\d+\/)(?![\w#/])|(?<![\w&])#(\d+)\b/g;
 const HAS_REF = new RegExp(REF.source);
 
 function linkRefs(root: HTMLElement) {
@@ -27,7 +27,7 @@ function linkRefs(root: HTMLElement) {
 		for (const m of t.data.matchAll(REF)) {
 			frag.append(t.data.slice(last, m.index));
 			const a = document.createElement('a');
-			a.href = m[1] ? `/docs/${m[1]}` : m[2] ? `/tasks/${m[2]}` : m[3] ? `/tasks/${m[3].replace(/\/$/, '')}` : `/m/${m[4]}`;
+			a.href = m[1] ? `/docs/${m[1]}` : m[2] ? `/tasks/${m[2]}` : m[3] ? `/reviews/${m[3]}` : m[4] ? `/tasks/${m[4].replace(/\/$/, '')}` : `/m/${m[5]}`;
 			a.textContent = m[0];
 			frag.append(a);
 			last = m.index! + m[0].length;

@@ -23,8 +23,8 @@
 			for (const s of segs) {
 				if (s.t === 'text') { frag.append(s.v); continue; }
 				const a = document.createElement('a');
-				a.textContent = s.t === 'handle' ? `@${s.v}` : s.t === 'doc' ? `doc:${s.v}` : s.t === 'msg' ? `#${s.v}` : s.t === 'task' ? `#${s.v}${s.v.includes('/') ? '' : '/'}` : s.v;
-				a.href = s.t === 'url' ? s.v : s.t === 'chat' ? s.href! : s.t === 'handle' ? `/?involving=${s.v}` : s.t === 'doc' ? `/docs/${s.v}` : s.t === 'task' ? `/tasks/${s.v}` : `/m/${s.v}`;
+				a.textContent = s.t === 'review' ? s.label! : s.t === 'handle' ? `@${s.v}` : s.t === 'doc' ? `doc:${s.v}` : s.t === 'msg' ? `#${s.v}` : s.t === 'task' ? `#${s.v}${s.v.includes('/') ? '' : '/'}` : s.v;
+				a.href = s.t === 'review' ? `/reviews/${s.v}` : s.t === 'url' ? s.v : s.t === 'chat' ? s.href! : s.t === 'handle' ? `/?involving=${s.v}` : s.t === 'doc' ? `/docs/${s.v}` : s.t === 'task' ? `/tasks/${s.v}` : `/m/${s.v}`;
 				if (s.t === 'url' || s.t === 'chat') { a.target = '_blank'; a.rel = 'noopener noreferrer'; }
 				if (s.t === 'chat') a.title = "open this agent's Claude chat";
 				frag.append(a);

@@ -12,7 +12,7 @@
 	const segs = $derived(segments(text));
 </script>
 
-{#snippet linked()}{#each segs as s}{#if s.t === 'text'}{s.v}{:else if s.t === 'url'}<a href={s.v} target="_blank" rel="noopener noreferrer">{s.v}</a>{:else if s.t === 'chat'}<a href={s.href} target="_blank" rel="noopener noreferrer" title="open this agent's Claude chat">{s.v}</a>{:else if s.t === 'handle'}<a href="/?involving={s.v}">@{s.v}</a>{:else if s.t === 'doc'}<a href="/docs/{s.v}">doc:{s.v}</a>{:else if s.t === 'task'}<a href="/tasks/{s.v}">#{s.v}{s.v.includes('/') ? '' : '/'}</a>{:else}<a href="/m/{s.v}">#{s.v}</a>{/if}{/each}{/snippet}
+{#snippet linked()}{#each segs as s}{#if s.t === 'text'}{s.v}{:else if s.t === 'url'}<a href={s.v} target="_blank" rel="noopener noreferrer">{s.v}</a>{:else if s.t === 'chat'}<a href={s.href} target="_blank" rel="noopener noreferrer" title="open this agent's Claude chat">{s.v}</a>{:else if s.t === 'handle'}<a href="/?involving={s.v}">@{s.v}</a>{:else if s.t === 'doc'}<a href="/docs/{s.v}">doc:{s.v}</a>{:else if s.t === 'task'}<a href="/tasks/{s.v}">#{s.v}{s.v.includes('/') ? '' : '/'}</a>{:else if s.t === 'review'}<a href="/reviews/{s.v}">{s.label}</a>{:else}<a href="/m/{s.v}">#{s.v}</a>{/if}{/each}{/snippet}
 {#if inline}<span class="inline">{@render linked()}</span>{:else}<div class="body">{@render linked()}</div>{/if}
 
 <style>
