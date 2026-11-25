@@ -17,6 +17,14 @@ BEGIN
     SELECT * INTO r FROM review x WHERE x.id = review_decide.id FOR UPDATE;
     IF NOT FOUND THEN RAISE EXCEPTION 'no review #%', review_decide.id; END IF;
     IF r.status IN ('merged', 'closed') THEN RAISE EXCEPTION 'review #% is already %', r.id, r.status; END IF;
+    SELECT * INTO v FROM review_rev x WHERE x.review_id = r.id ORDER BY x.rev DESC LIMIT 1;
+    -- a repeated click (guy 11-25: review #401 approved 4x in 30 s) must not notify the agent again:
+    -- same decision, already made after the latest revision, no new note -> no-op
+    IF ((dec = 'approve' AND r.status = 'approved') OR (dec = 'changes' AND r.status = 'changes'))
+       AND r.decided_at IS NOT NULL AND (v.created_at IS NULL OR r.decided_at >= v.created_at)
+       AND coalesce(btrim(review_decide.note), '') = '' THEN
+        RETURN json_build_object('id', r.id, 'status', r.status, 'message_id', NULL, 'repeat', true);
+    END IF;
     UPDATE review x SET status = CASE WHEN dec = 'approve' THEN 'approved' ELSE 'changes' END, decided_by = me, decided_at = now(),
            decision_note = nullif(btrim(review_decide.note), ''), updated_at = now()
     WHERE x.id = r.id RETURNING * INTO r;
