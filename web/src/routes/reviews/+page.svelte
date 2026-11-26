@@ -3,7 +3,7 @@
 	import { page } from '$app/state';
 	import { replaceState } from '$app/navigation';
 
-	type R = { id: number; agent: string; repo: string; branch: string; base: string; title: string; status: string;
+	type R = { id: number; agent: string; repo: string; repo_name: string; branch: string; base: string; title: string; status: string;
 		rev: number; adds: number; dels: number; files: number; open_comments: number; created_at: string; updated_at: string;
 		rev_at: string; task_path: string | null; decided_by: string | null };
 	let rows = $state<R[]>([]);
@@ -15,7 +15,7 @@
 	let q = $state(sp.get('q') ?? '');
 	$effect(() => {
 		const f = showClosed ? '' : '&status=in.(open,approved,changes)';
-		api<R[]>(`/reviews?select=id,agent,repo,branch,base,title,status,rev,adds,dels,files,open_comments,created_at,updated_at,rev_at,task_path,decided_by${f}`)
+		api<R[]>(`/reviews?select=id,agent,repo,repo_name,branch,base,title,status,rev,adds,dels,files,open_comments,created_at,updated_at,rev_at,task_path,decided_by${f}`)
 			.then((r) => (rows = r.data)).catch((e) => (error = e.message));
 	});
 
@@ -31,7 +31,7 @@
 		{ key: 'size', label: 'Size', num: true, title: 'lines added + removed' },
 		{ key: 'open_comments', label: '💬', num: true, title: 'open comments' },
 		{ key: 'agent', label: 'Agent' },
-		{ key: 'repo', label: 'Project' },
+		{ key: 'repo_name', label: 'Project' },
 		{ key: 'branch', label: 'Branch' },
 		{ key: 'task_path', label: 'Task' },
 		{ key: 'rev', label: 'Rev', num: true, title: 'revisions submitted' },
@@ -61,7 +61,7 @@
 		k === 'size' ? r.adds + r.dels : k === 'status' ? order[r.status] ?? 9 : k === 'task_path' ? (r.task_path ?? '') : (r[k] as string | number) ?? '';
 	const shown = $derived.by(() => {
 		const needle = q.trim().toLowerCase();
-		const f = needle ? rows.filter((r) => [r.title, r.agent, r.repo, r.branch, r.task_path ?? '', String(r.id), r.status].join(' ').toLowerCase().includes(needle)) : rows;
+		const f = needle ? rows.filter((r) => [r.title, r.agent, r.repo, r.repo_name, r.branch, r.task_path ?? '', String(r.id), r.status].join(' ').toLowerCase().includes(needle)) : rows;
 		return [...f].sort((a, b) => {
 			const x = val(a, sortKey), y = val(b, sortKey);
 			const c = typeof x === 'number' && typeof y === 'number' ? x - y : String(x).localeCompare(String(y), undefined, { numeric: true });
@@ -72,7 +72,7 @@
 	// batch review (guy, 11-26): repos with 2+ open reviews under 500 changed lines, one screen each at /reviews/batch
 	const batches = $derived.by(() => {
 		const m = new Map<string, R[]>();
-		for (const r of rows) if (r.status === 'open' && r.adds + r.dels < 500) m.set(r.repo, [...(m.get(r.repo) ?? []), r]);
+		for (const r of rows) if (r.status === 'open' && r.adds + r.dels < 500) m.set(r.repo_name, [...(m.get(r.repo_name) ?? []), r]);
 		return [...m.entries()].filter(([, rs]) => rs.length > 1).sort((x, y) => y[1].length - x[1].length);
 	});
 	const totals = $derived({ n: shown.length, files: shown.reduce((s, r) => s + r.files, 0), adds: shown.reduce((s, r) => s + r.adds, 0),
@@ -117,7 +117,7 @@
 					<td class="num">{r.adds + r.dels}</td>
 					<td class="num">{r.open_comments || ''}</td>
 					<td>{r.agent}</td>
-					<td class="mono wrapc">{r.repo}</td>
+					<td class="mono wrapc" title={r.repo !== r.repo_name ? `submitted from ${r.repo}` : undefined}>{r.repo_name}</td>
 					<td class="mono wrapc">{r.branch} → {r.base}</td>
 					<td>{#if r.task_path}<a href="/tasks/{r.task_path}">#{r.task_path}</a>{/if}</td>
 					<td class="num">{r.rev}</td>

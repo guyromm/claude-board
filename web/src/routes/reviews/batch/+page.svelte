@@ -12,7 +12,7 @@
 	import { head } from '#lib/title.svelte.ts';
 	import ReviewView from '#lib/ReviewView.svelte';
 
-	type Row = { id: number; agent: string; repo: string; title: string; status: string; adds: number; dels: number; files: number; open_comments: number };
+	type Row = { id: number; agent: string; repo: string; repo_name: string; title: string; status: string; adds: number; dels: number; files: number; open_comments: number };
 	type View = { decide: (d: 'approve' | 'changes') => Promise<boolean>; status: () => string | null };
 
 	const sp = page.url.searchParams;
@@ -22,7 +22,7 @@
 	let error = $state('');
 	let loaded = $state(false);
 	$effect(() => {
-		api<Row[]>('/reviews?select=id,agent,repo,title,status,adds,dels,files,open_comments&status=eq.open&order=id')
+		api<Row[]>('/reviews?select=id,agent,repo,repo_name,title,status,adds,dels,files,open_comments&status=eq.open&order=id')
 			.then((r) => { rows = r.data; loaded = true; }).catch((e) => (error = e.message));
 	});
 	$effect(() => {
@@ -37,12 +37,14 @@
 	const small = $derived(rows.filter((r) => r.adds + r.dels < max));
 	const repos = $derived.by(() => {
 		const m = new Map<string, Row[]>();
-		for (const r of small) m.set(r.repo, [...(m.get(r.repo) ?? []), r]);
+		// by repo_name (from the git remote), not repo (the submitting directory's name: a worktree such as 'wg-night' or
+		// 'wt-batch' split one repo into many, guy 11-26)
+		for (const r of small) m.set(r.repo_name, [...(m.get(r.repo_name) ?? []), r]);
 		return [...m.entries()].map(([name, rs]) => ({ name, rs, adds: rs.reduce((s, r) => s + r.adds, 0), dels: rs.reduce((s, r) => s + r.dels, 0) }))
 			.sort((a, b) => b.rs.length - a.rs.length || a.name.localeCompare(b.name));
 	});
 	// the batch is fixed once loaded: a review stays on screen after it is decided (its badge changes), so nothing jumps
-	const batch = $derived(small.filter((r) => r.repo === repo));
+	const batch = $derived(small.filter((r) => r.repo_name === repo));
 	let decided = $state<Record<number, string>>({});
 	const views: Record<number, View> = {};
 	const stillOpen = $derived(batch.filter((r) => (decided[r.id] ?? 'open') === 'open'));
