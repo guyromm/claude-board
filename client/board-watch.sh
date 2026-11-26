@@ -18,7 +18,7 @@
 # and, when the board has a newer one, installs the new board + board-watch.sh and exits, so its restart
 # loop (board watch-start, or the project's tmux.sh worker) starts the new version. Bump WATCH_VERSION
 # here to push a change to every agent.
-WATCH_VERSION=27  # v27: refreshes its board token daily (7-day tokens, api.refresh_my_token, #308/8); v26: /agents login accepts Claude Code's short sign-in link (claude.ai/oauth/authorize?z-...); v25: answers the workspace trust prompt with "Yes, I trust this folder"; menu picker searches down and up
+WATCH_VERSION=28  # v28: a pinned target (W.P, %id) that lost Claude falls back to the only Claude pane in its session or tmux server (#4715); v27: refreshes its board token daily (7-day tokens, api.refresh_my_token, #308/8); v26: /agents login accepts Claude Code's short sign-in link (claude.ai/oauth/authorize?z-...); v25: answers the workspace trust prompt with "Yes, I trust this folder"; menu picker searches down and up
 # v24: answers "Try the new fullscreen renderer?" with "Yes, try it"
 # v23: types /restart when Claude Code shows "Update installed · /restart to apply" and the session is idle (Remote Control: off for the restart, back on after)
 # v22: a draft left in the input line holds delivery at most 10 min, then it is set aside and typed back
@@ -78,14 +78,45 @@ claude_under() {
 # BOARD_TMUX_TARGET usually names a window ("proj:claude"), which tmux resolves to that window's ACTIVE pane:
 # once a human splits the window and works in the new pane, that is their shell (ofana, 11-04: notifications
 # nearly went into a `git add -p` prompt). So every poll T becomes the window's pane that runs Claude (the
-# active pane if none does). A pane id (%23) or an explicit pane (proj:claude.1) is used as given.
-resolve_target() {
-    if [[ "$BOARD_TMUX_TARGET" == %* || "$BOARD_TMUX_TARGET" =~ \.[0-9]+$ ]]; then T="$BOARD_TMUX_TARGET"; return; fi
+# active pane if none does). A pane id (%23) or an explicit pane (proj:5.0) is tried first as given.
+# DRIFT (v28, sippur 11-26 #4715): a tmux rebuild renumbers windows, so a pinned "proj:5.0" or "%174" can end up
+# on a plain shell while Claude sits elsewhere. When the target has no Claude, look for it in the target's
+# session, then on the whole tmux server, and use it only if EXACTLY ONE pane runs Claude there (several = other
+# agents may share the server: never guess). Logged once per change, with the fix.
+DRIFT=
+claude_panes() {   # $@ = tmux list-panes scope args; prints the pane ids that run Claude
     local id pid
+    while read -r id pid; do claude_under "$pid" && echo "$id"; done < <(tmux list-panes "$@" -F '#{pane_id} #{pane_pid}' 2>/dev/null)
+}
+resolve_target() {
+    local id sess found
     T="$BOARD_TMUX_TARGET"
-    while read -r id pid; do
-        if claude_under "$pid"; then T="$id"; return; fi
-    done < <(tmux list-panes -t "$BOARD_TMUX_TARGET" -F '#{pane_id} #{pane_pid}' 2>/dev/null)
+    if [[ "$BOARD_TMUX_TARGET" == %* || "$BOARD_TMUX_TARGET" =~ \.[0-9]+$ ]]; then
+        claude_under "$(tmux display-message -p -t "$T" '#{pane_pid}' 2>/dev/null)" && { target_drift ""; return; }
+    else
+        id=$(claude_panes -t "$BOARD_TMUX_TARGET" | head -1)
+        [ -n "$id" ] && { T="$id"; target_drift ""; return; }
+    fi
+    sess=$(tmux display-message -p -t "$BOARD_TMUX_TARGET" '#{session_name}' 2>/dev/null)
+    [ -z "$sess" ] && [[ "$BOARD_TMUX_TARGET" != %* ]] && sess="${BOARD_TMUX_TARGET%%:*}"
+    if [ -n "$sess" ] && tmux has-session -t "=$sess" 2>/dev/null; then
+        found=$(claude_panes -s -t "=$sess")
+        if [ "$(printf '%s' "$found" | grep -c .)" = 1 ]; then T="$found"; target_drift "session $sess"; return; fi
+        [ -n "$found" ] && { target_drift ""; return; }   # several Claude panes in the session: don't guess
+    fi
+    found=$(claude_panes -a)
+    if [ "$(printf '%s' "$found" | grep -c .)" = 1 ]; then T="$found"; target_drift "tmux server"; return; fi
+    target_drift ""
+}
+target_drift() {   # $1 = where Claude was found instead of the target ("" = no drift)
+    local now_d="${1:+$BOARD_TMUX_TARGET -> $T}"
+    [ "$now_d" = "$DRIFT" ] && return
+    if [ -n "$now_d" ]; then
+        log "target drifted: $now_d (the only Claude pane in the $1; fix: board profile --tmux SESSION:WINDOWNAME, e.g. $(tmux display-message -p -t "$T" '#{session_name}:#{window_name}' 2>/dev/null))"
+    else
+        log "target drift ended: notices go to $T again"
+    fi
+    DRIFT=$now_d
 }
 SESSION=ok; SESSION_DETAIL=; BLOCKED_SINCE=0
 check_session() {

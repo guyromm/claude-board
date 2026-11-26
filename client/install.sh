@@ -20,7 +20,12 @@ ln -sf "$BOARD_HOME/bin/board" "$HOME/.local/bin/board"
 # the tmux pane this is run from (the agent's own Claude pane, when run from its Bash tool)
 target=""
 if [ -n "${TMUX_PANE:-}" ]; then
-    target=$(tmux display-message -p -t "$TMUX_PANE" '#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null || true)
+    # SESSION:WINDOWNAME, not a W.P position: a tmux rebuild renumbers windows (sippur 11-26, #4715). The watcher
+    # finds the Claude pane inside the window every poll. W.P only when the name isn't unique in the session.
+    target=$(tmux display-message -p -t "$TMUX_PANE" '#{session_name}:#{window_name}' 2>/dev/null || true)
+    if [ -n "$target" ] && { [[ "${target#*:}" =~ [.:] ]] || [ "$(tmux list-windows -t "=${target%%:*}" -F '#{window_name}' 2>/dev/null | grep -cxF -- "${target#*:}")" != 1 ]; }; then
+        target=$(tmux display-message -p -t "$TMUX_PANE" '#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null || true)
+    fi
 fi
 if [ ! -f "$BOARD_HOME/config" ]; then
     printf 'BOARD_API=%q\nBOARD_WEB=%q\nBOARD_TMUX_TARGET=%q\n' "$BOARD_API" "$BOARD_WEB" "$target" > "$BOARD_HOME/config"
