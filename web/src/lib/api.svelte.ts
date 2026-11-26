@@ -32,11 +32,31 @@ export function setSession(s: Session) {
 
 // "Sign in with auth.webgma.co.il": the server keeps auth's cookies; /auth/token gives the current 15-min token,
 // whoami maps it to a board handle (auth's board_admin grant -> the human row of the same username). Awaited by the
-// root layout before any page redirects to /login, and repeated every 10 min. A leftover password-login session
-// (retired, #275/5; the API refuses its token now) is dropped.
+// root layout before any page redirects to /login, and renewed while it still has 5+ min left. A leftover
+// password-login session (retired, #275/5; the API refuses its token now) is dropped.
+// RENEWAL (entertainment #4807, 11-26: 7 of guy's chat messages were lost on a phone): a background tab's timers are
+// suspended, so a plain 10-min interval let the 15-min token expire. Now a 1-min check renews when under 5 min are
+// left, and returning to the tab (visibilitychange / focus) checks at once.
+const expOf = (t: string | undefined): number => {
+	try { return t ? JSON.parse(atob(t.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))).exp * 1000 : 0; } catch { return 0; }
+};
 let authTimer: ReturnType<typeof setInterval> | undefined;
-export async function syncAuth(): Promise<void> {
-	authTimer ??= setInterval(() => void syncAuth(), 10 * 60 * 1000);
+let syncing: Promise<void> | null = null;
+export function renewIfDue(): Promise<void> {
+	if (session.current?.via !== 'auth' && session.current) return Promise.resolve();
+	if (expOf(session.current?.token) - Date.now() > 5 * 60_000) return Promise.resolve();
+	return syncAuth();
+}
+export function syncAuth(): Promise<void> {
+	if (!authTimer && typeof window !== 'undefined') {
+		authTimer = setInterval(() => void renewIfDue(), 60_000);
+		const wake = () => { if (document.visibilityState === 'visible') void renewIfDue(); };
+		document.addEventListener('visibilitychange', wake);
+		window.addEventListener('focus', wake);
+	}
+	return (syncing ??= doSync().finally(() => (syncing = null)));
+}
+async function doSync(): Promise<void> {
 	if (session.current && !session.current.via) setSession(null);
 	try {
 		const r = await fetch('/auth/token', { cache: 'no-store' });
@@ -79,15 +99,21 @@ export async function api<T = any>(
 	path: string,
 	opts: { method?: string; body?: unknown; count?: boolean } = {}
 ): Promise<{ data: T; total: number | null }> {
-	const headers: Record<string, string> = { Accept: 'application/json' };
-	if (session.current) headers.Authorization = `Bearer ${session.current.token}`;
-	if (opts.body !== undefined) headers['Content-Type'] = 'application/json';
-	if (opts.count) headers.Prefer = 'count=exact';
-	const res = await fetch(API + path, {
-		method: opts.method ?? (opts.body !== undefined ? 'POST' : 'GET'),
-		headers,
-		body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined
-	});
+	await renewIfDue();   // a token about to expire (phone tab back from the background) is renewed first
+	const send = () => {
+		const headers: Record<string, string> = { Accept: 'application/json' };
+		if (session.current) headers.Authorization = `Bearer ${session.current.token}`;
+		if (opts.body !== undefined) headers['Content-Type'] = 'application/json';
+		if (opts.count) headers.Prefer = 'count=exact';
+		return fetch(API + path, {
+			method: opts.method ?? (opts.body !== undefined ? 'POST' : 'GET'),
+			headers,
+			body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined
+		});
+	};
+	let res = await send();
+	// 401 on an auth session: renew once and retry before giving up (the write must not be lost)
+	if (res.status === 401 && session.current?.via === 'auth') { await syncAuth(); if (session.current) res = await send(); }
 	const text = await res.text();
 	const data = text ? JSON.parse(text) : null;
 	if (!res.ok) {
