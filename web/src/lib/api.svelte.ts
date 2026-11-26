@@ -1,3 +1,4 @@
+import { untrack } from 'svelte';
 // PostgREST client + session for the board UI. The API lives on the sibling host api.<this host>
 // (board.example.com -> api.board.example.com); localhost dev talks to the local PostgREST.
 export const API =
@@ -42,9 +43,16 @@ const expOf = (t: string | undefined): number => {
 };
 let authTimer: ReturnType<typeof setInterval> | undefined;
 let syncing: Promise<void> | null = null;
+// at most one renewal per 30 s: if the server hands back the same token, asking on every request would hammer it
+let lastSync = 0;
 export function renewIfDue(): Promise<void> {
+	return untrack(renewIfDueNow);
+}
+function renewIfDueNow(): Promise<void> {
 	if (session.current?.via !== 'auth' && session.current) return Promise.resolve();
 	if (expOf(session.current?.token) - Date.now() > 5 * 60_000) return Promise.resolve();
+	if (syncing) return syncing;
+	if (Date.now() - lastSync < 30_000) return Promise.resolve();
 	return syncAuth();
 }
 export function syncAuth(): Promise<void> {
@@ -54,9 +62,11 @@ export function syncAuth(): Promise<void> {
 		document.addEventListener('visibilitychange', wake);
 		window.addEventListener('focus', wake);
 	}
+	lastSync = Date.now();
 	return (syncing ??= doSync().finally(() => (syncing = null)));
 }
 async function doSync(): Promise<void> {
+	await Promise.resolve();   // everything below runs outside the caller's effect (no session dependency)
 	if (session.current && !session.current.via) setSession(null);
 	try {
 		const r = await fetch('/auth/token', { cache: 'no-store' });
@@ -71,6 +81,9 @@ async function doSync(): Promise<void> {
 			return;
 		}
 		const me = await w.json();
+		const c = session.current;
+		// the same session again: no state change, or every page that depends on the session re-runs (the 11-26 loop)
+		if (c && c.via === 'auth' && c.token === token && c.handle === me.handle && c.is_admin === !!me.is_admin) return;
 		setSession({ handle: me.handle, token, is_admin: !!me.is_admin, via: 'auth' });
 	} catch {
 		/* network hiccup: keep the current session, retry on the next tick */
@@ -99,10 +112,13 @@ export async function api<T = any>(
 	path: string,
 	opts: { method?: string; body?: unknown; count?: boolean } = {}
 ): Promise<{ data: T; total: number | null }> {
+	// api() must not make the calling $effect depend on the session (11-26: every renewal re-ran every page's loader,
+	// blanking /reviews/batch): the session is read untracked
 	await renewIfDue();   // a token about to expire (phone tab back from the background) is renewed first
 	const send = () => {
 		const headers: Record<string, string> = { Accept: 'application/json' };
-		if (session.current) headers.Authorization = `Bearer ${session.current.token}`;
+		const tok = untrack(() => session.current?.token);
+		if (tok) headers.Authorization = `Bearer ${tok}`;
 		if (opts.body !== undefined) headers['Content-Type'] = 'application/json';
 		if (opts.count) headers.Prefer = 'count=exact';
 		return fetch(API + path, {
@@ -113,7 +129,7 @@ export async function api<T = any>(
 	};
 	let res = await send();
 	// 401 on an auth session: renew once and retry before giving up (the write must not be lost)
-	if (res.status === 401 && session.current?.via === 'auth') { await syncAuth(); if (session.current) res = await send(); }
+	if (res.status === 401 && untrack(() => session.current?.via) === 'auth') { await syncAuth(); if (untrack(() => session.current)) res = await send(); }
 	const text = await res.text();
 	const data = text ? JSON.parse(text) : null;
 	if (!res.ok) {

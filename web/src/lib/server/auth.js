@@ -100,10 +100,13 @@ export async function authenticate(event) {
 	const { cookies } = event;
 	event.locals.auth = null;
 	let token = cookies.get(AT), c = token && (await verify(token));
-	if (!c && cookies.get(RT)) {
+	// /auth/token (the client's renewal, which runs when under 5 min are left) refreshes EARLY, so it gets a new token
+	// instead of the same one back (11-26: the same token re-stored on every request looped /reviews/batch)
+	const early = !!c && event.url.pathname === '/auth/token' && c.exp - Date.now() / 1000 < 300;
+	if ((!c || early) && cookies.get(RT)) {
 		const r = await post('/api/refresh', { refresh_token: cookies.get(RT) });
 		if (r.status === 200) { store(cookies, r.body); token = r.body.access_token; c = await verify(token); }
-		else if (r.status === 401) clear(cookies); // revoked at auth: signed out here too
+		else if (r.status === 401 && !early) clear(cookies); // revoked at auth: signed out here too
 		// other errors (auth down): stay signed out for this request, keep the refresh handle for the next one
 	}
 	if (!c) return;
