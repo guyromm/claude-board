@@ -84,6 +84,7 @@ board.remote_repo.text.FUNCTION.sql
 board.require_admin.FUNCTION.sql
 board.require_curator.FUNCTION.sql
 board.require_me.FUNCTION.sql
+board.review_clear_flags.bigint.FUNCTION.sql
 board.review_url.bigint.FUNCTION.sql
 board.schedule_notifications.bigint.FUNCTION.sql
 board.sign_jwt.json.FUNCTION.sql
@@ -369,6 +370,7 @@ board.FUNCTION.remote_repo.u.text.ACL.sql
 board.FUNCTION.require_admin.ACL.sql
 board.FUNCTION.require_curator.ACL.sql
 board.FUNCTION.require_me.ACL.sql
+board.FUNCTION.review_clear_flags.rid.bigint.ACL.sql
 board.FUNCTION.review_url.id.bigint.ACL.sql
 board.FUNCTION.schedule_notifications.msg.bigint.ACL.sql
 board.FUNCTION.sign_jwt.claims.json.ACL.sql
