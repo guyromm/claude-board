@@ -2151,6 +2151,20 @@ BEGIN
 END $$;
 
 -- guy's decision: approve -> the agent merges + pushes; changes -> the agent fixes and re-submits. Admins only.
+-- guy's "Needs you" must not keep reviews he has already decided (11-13; 11-26 guy: "already merged wtf" on #119/4):
+-- a task flagged with review links clears once NO review it names still waits for guy (status open), and no other
+-- review filed under that task does. 'approved' and 'changes' are the agent's turn, not guy's. Called on every
+-- decision and on merged/closed.
+CREATE OR REPLACE FUNCTION board.review_clear_flags(rid bigint) RETURNS void LANGUAGE sql VOLATILE SECURITY DEFINER
+SET search_path = board, public AS $$
+    UPDATE task t SET needs_human = false, updated_at = now()
+     WHERE t.needs_human AND t.human_reason ~ ('/reviews/' || rid || '([^0-9]|$)')
+       AND NOT EXISTS (SELECT 1 FROM regexp_matches(t.human_reason, '/reviews/([0-9]+)', 'g') mm
+                       JOIN review o ON o.id = mm[1]::bigint WHERE o.status = 'open')
+       AND NOT EXISTS (SELECT 1 FROM review o WHERE o.task_id = t.id AND o.status = 'open');
+$$;
+REVOKE ALL ON FUNCTION board.review_clear_flags(bigint) FROM PUBLIC;
+
 CREATE OR REPLACE FUNCTION api.review_decide(id bigint, decision text, note text DEFAULT NULL)
 RETURNS json LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = board, public AS $$
 DECLARE me text := board.require_me(); r board.review; dec text := lower(btrim(review_decide.decision)); open_c bigint; msg json;
@@ -2176,6 +2190,7 @@ BEGIN
     UPDATE review x SET status = CASE WHEN dec = 'approve' THEN 'approved' ELSE 'changes' END, decided_by = me, decided_at = now(),
            decision_note = nullif(btrim(review_decide.note), ''), updated_at = now()
     WHERE x.id = r.id RETURNING * INTO r;
+    PERFORM board.review_clear_flags(r.id);
     SELECT count(*) INTO open_c FROM review_comment c WHERE c.review_id = r.id AND c.resolved_at IS NULL;
     SELECT * INTO v FROM review_rev x WHERE x.review_id = r.id ORDER BY x.rev DESC LIMIT 1;
     msg := api.post(
@@ -2210,14 +2225,7 @@ BEGIN
     UPDATE review x SET status = st, merged_sha = coalesce(nullif(btrim(review_done.sha), ''), x.merged_sha), updated_at = now(),
            decision_note = coalesce(x.decision_note || E'\n', '') || coalesce(nullif(btrim(review_done.note), ''), '')
     WHERE x.id = r.id;
-    -- guy's "Needs you" must not keep reviews that are done (11-13): a task flagged only with review links clears
-    -- once every review it names is merged or closed (and no other review on that task is still live)
-    UPDATE task t SET needs_human = false, updated_at = now()
-     WHERE t.needs_human AND t.human_reason ~ '/reviews/[0-9]+'
-       AND t.human_reason ~ ('/reviews/' || r.id || '([^0-9]|$)')
-       AND NOT EXISTS (SELECT 1 FROM regexp_matches(t.human_reason, '/reviews/([0-9]+)', 'g') mm
-                       JOIN review o ON o.id = mm[1]::bigint WHERE o.status NOT IN ('merged', 'closed'))
-       AND NOT EXISTS (SELECT 1 FROM review o WHERE o.task_id = t.id AND o.status IN ('open', 'approved', 'changes'));
+    PERFORM board.review_clear_flags(r.id);
     RETURN format('review #%s %s -- %s', r.id, st, board.review_url(r.id));
 END $$;
 

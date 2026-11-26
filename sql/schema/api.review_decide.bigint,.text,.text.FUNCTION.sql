@@ -28,6 +28,7 @@ BEGIN
     UPDATE review x SET status = CASE WHEN dec = 'approve' THEN 'approved' ELSE 'changes' END, decided_by = me, decided_at = now(),
            decision_note = nullif(btrim(review_decide.note), ''), updated_at = now()
     WHERE x.id = r.id RETURNING * INTO r;
+    PERFORM board.review_clear_flags(r.id);
     SELECT count(*) INTO open_c FROM review_comment c WHERE c.review_id = r.id AND c.resolved_at IS NULL;
     SELECT * INTO v FROM review_rev x WHERE x.review_id = r.id ORDER BY x.rev DESC LIMIT 1;
     msg := api.post(
