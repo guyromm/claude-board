@@ -75,6 +75,7 @@
 		for (const r of rows) if (r.status === 'open' && r.adds + r.dels < 500) m.set(r.repo_name, [...(m.get(r.repo_name) ?? []), r]);
 		return [...m.entries()].filter(([, rs]) => rs.length > 1).sort((x, y) => y[1].length - x[1].length);
 	});
+	const smallOpen = $derived(rows.filter((r) => r.status === 'open' && r.adds + r.dels < 500).length);
 	const totals = $derived({ n: shown.length, files: shown.reduce((s, r) => s + r.files, 0), adds: shown.reduce((s, r) => s + r.adds, 0),
 		dels: shown.reduce((s, r) => s + r.dels, 0) });
 </script>
@@ -88,10 +89,10 @@
 	<span class="muted small">{totals.n} review{totals.n === 1 ? '' : 's'} · {totals.files} files · <span class="plus">+{totals.adds}</span> <span class="minus">−{totals.dels}</span></span>
 </div>
 {#if error}<p class="error">{error}</p>{/if}
-{#if batches.length}
-	<p class="batches small">Review together (open, under 500 lines):
-		{#each batches as [name, rs], i}{i ? ' · ' : ' '}<a href="/reviews/batch?repo={encodeURIComponent(name)}"><span class="mono">{name}</span> ({rs.length})</a>{/each}
-		· <a href="/reviews/batch">all repos</a></p>
+{#if smallOpen > 1}
+	<p class="batches small">Review together (open, under 500 lines): <a href="/reviews/batch?repo=*"><b>all {smallOpen} on one screen</b></a>
+		{#each batches as [name, rs]} · <a href="/reviews/batch?repo={encodeURIComponent(name)}"><span class="mono">{name}</span> ({rs.length})</a>{/each}
+		· <a href="/reviews/batch">by repo</a></p>
 {/if}
 <div class="wrap panel">
 	<table>
