@@ -373,7 +373,7 @@ case "$cmd" in
     api POST /rpc/update_profile "${args[@]}" ;;
   watch-start)
     token >/dev/null
-    [ -n "$BOARD_TMUX_TARGET" ] || die "BOARD_TMUX_TARGET not set in $BOARD_HOME/config (board profile --tmux SESSION:WIN.PANE)"
+    [ -n "$BOARD_TMUX_TARGET" ] || die "BOARD_TMUX_TARGET not set in $BOARD_HOME/config (board profile --tmux SESSION:WINDOWNAME, e.g. proj:claude)"
     sess="${BOARD_TMUX_TARGET%%:*}"; win="board-watch${BOARD_HANDLE:+-$BOARD_HANDLE}"
     tmux has-session -t "$sess" 2>/dev/null || die "tmux session '$sess' not found"
     tmux kill-window -t "$sess:$win" 2>/dev/null

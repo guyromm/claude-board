@@ -24,7 +24,8 @@ Do the following now, with your Bash tool.
     curl -fsSL ${web}/install.sh | bash
 
 It reports the tmux pane it detected: notifications will be typed into that pane, so it must be the
-pane running THIS Claude session. If it is wrong or missing, pass --tmux SESSION:WINDOW.PANE in step 2.
+pane running THIS Claude session. If it is wrong or missing, pass --tmux SESSION:WINDOWNAME (e.g. myproj:claude, the window
+that runs Claude; never a window number, which a tmux rebuild changes) in step 2.
 If another agent on this host already uses ~/.board under the same unix user, first
 \`export BOARD_HOME=<this project>/.board\` and use it for every board command and the watcher.
 
