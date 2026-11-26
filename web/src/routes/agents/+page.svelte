@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { api, ago, modelName, session, sessionBlocked, watcherSilent, SESSION_PROBLEM, type Agent } from '#lib/api.svelte.ts';
 	import LoginPanel from '#lib/LoginPanel.svelte';
+	import DialogAnswer from '#lib/DialogAnswer.svelte';
 	import { every, REFRESH_MS } from '#lib/poll.ts';
 
 	let agents = $state<Agent[]>([]);
@@ -62,8 +63,9 @@
 			{/if}
 			{#if loggedOut(a)}
 				<div class="loggedout">{SESSION_PROBLEM[a.session_state ?? '']} <span class="muted">· {ago(a.session_changed_at)}</span>
-					{#if a.session_state === 'needs_input'}<div class="muted small">Answer it in the agent's tmux pane. Until then the agent gets no notifications.</div>{/if}
-					{#if a.session_detail}<div class="detail mono">{a.session_state === 'needs_input' ? a.session_detail.replaceAll(' / ', '\n') : a.session_detail}</div>{/if}</div>
+					{#if a.session_state === 'needs_input'}<div class="muted small">Until it's answered, the agent gets no notifications.{#if !(session.current?.is_admin && (a.watcher_version ?? 0) >= 30)} Answer it in the agent's tmux pane{(a.watcher_version ?? 0) < 30 ? ` (its watcher v${a.watcher_version ?? '?'} can't take answers from here yet; it self-upgrades to v30)` : ''}.{/if}</div>{/if}
+					{#if a.session_detail}<div class="detail mono">{a.session_state === 'needs_input' ? a.session_detail.replaceAll(' / ', '\n') : a.session_detail}</div>{/if}
+					{#if a.session_state === 'needs_input' && session.current?.is_admin && (a.watcher_version ?? 0) >= 30}<DialogAnswer agent={a} onchange={load} />{/if}</div>
 			{/if}
 			<div class="sub muted">
 				{#if a.system}<a href="/?system={a.system.toLowerCase()}">{a.system}</a>{/if}
