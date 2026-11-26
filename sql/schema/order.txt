@@ -5,6 +5,7 @@ api.activity_load.timestamp.with.time.zone,.timestamp.with.time.zone,.text,.text
 api.activity_periods.timestamp.with.time.zone,.timestamp.with.time.zone,.text.FUNCTION.sql
 api.activity_push.text.FUNCTION.sql
 api.cancel_login.bigint.FUNCTION.sql
+api.claude_presence.text,.boolean.FUNCTION.sql
 api.client_save.text,.text,.text,.text.FUNCTION.sql
 api.create_invite.text,.integer,.integer.FUNCTION.sql
 api.directory.FUNCTION.sql
@@ -63,6 +64,8 @@ board.activity_target.text,.timestamp.with.time.zone.FUNCTION.sql
 board.auth_handle.json.FUNCTION.sql
 board.b64url.bytea.FUNCTION.sql
 board.check_budget.text,.bigint,.boolean.FUNCTION.sql
+board.claude_session_touch.text,.boolean,.integer.FUNCTION.sql
+board.claude_who.FUNCTION.sql
 board.compare_url.text,.text,.text.FUNCTION.sql
 board.expire_logins.FUNCTION.sql
 board.fmt_age.interval.FUNCTION.sql
@@ -109,6 +112,11 @@ board.activity_minute.TABLE.sql
 board.recipient.TABLE.sql
 board.task_note.TABLE.sql
 api.agents.VIEW.sql
+board.claude_session.TABLE.sql
+board.TABLE.claude_session.COMMENT.sql
+board.COLUMN.claude_session.who.COMMENT.sql
+board.COLUMN.claude_session.urls.COMMENT.sql
+api.claude_sessions.VIEW.sql
 board.client.TABLE.sql
 board.project_client.TABLE.sql
 api.clients.VIEW.sql
@@ -151,6 +159,8 @@ api.thread_links.VIEW.sql
 board.thread_summary_version.TABLE.sql
 api.thread_summary_versions.VIEW.sql
 board.attention.VIEW.sql
+board.claude_session_id_seq.SEQUENCE.sql
+board.claude_session_id_seq.SEQUENCE.OWNED.BY.sql
 board.doc_comment_id_seq.SEQUENCE.sql
 board.doc_id_seq.SEQUENCE.sql
 board.login_request_id_seq.SEQUENCE.sql
@@ -168,10 +178,12 @@ board.task_notice.TABLE.sql
 board.task_notice_id_seq.SEQUENCE.sql
 board.thread_summary_version_id_seq.SEQUENCE.sql
 board.thread_summary_version_id_seq.SEQUENCE.OWNED.BY.sql
+board.claude_session.id.DEFAULT.sql
 board.thread_summary_version.id.DEFAULT.sql
 board.activity_minute.activity_minute_pkey.CONSTRAINT.sql
 board.agent.agent_pkey.CONSTRAINT.sql
 board.agent_token.agent_token_pkey.CONSTRAINT.sql
+board.claude_session.claude_session_pkey.CONSTRAINT.sql
 board.client.client_pkey.CONSTRAINT.sql
 board.doc_comment.doc_comment_pkey.CONSTRAINT.sql
 board.doc.doc_pkey.CONSTRAINT.sql
@@ -204,6 +216,7 @@ board.thread_summary.thread_summary_pkey.CONSTRAINT.sql
 board.thread_summary_version.thread_summary_version_pkey.CONSTRAINT.sql
 board.activity_minute_minute_idx.INDEX.sql
 board.agent_token_handle.INDEX.sql
+board.claude_session_who.INDEX.sql
 board.doc_comment_doc.INDEX.sql
 board.login_request_handle_idx.INDEX.sql
 board.message_created_idx.INDEX.sql
@@ -293,6 +306,7 @@ api.FUNCTION.activity_load.since.timestamp.with.time.zone,.until.timestamp.with.
 api.FUNCTION.activity_periods.since.timestamp.with.time.zone,.until.timestamp.with.time.zone,.who.text.ACL.sql
 api.FUNCTION.activity_push.data.text.ACL.sql
 api.FUNCTION.cancel_login.id.bigint.ACL.sql
+api.FUNCTION.claude_presence.p_url.text,.p_load.boolean.ACL.sql
 api.FUNCTION.client_save.slug.text,.name.text,.kind.text,.notes.text.ACL.sql
 api.FUNCTION.create_invite.note.text,.max_uses.integer,.valid_days.integer.ACL.sql
 api.FUNCTION.directory.ACL.sql
@@ -390,6 +404,7 @@ board.FUNCTION.token_for.h.text,.reason.text,.issued_by.text,.ttl.interval.ACL.s
 board.FUNCTION.via_auth.ACL.sql
 api.TABLE.agent_tokens.ACL.sql
 api.TABLE.agents.ACL.sql
+api.TABLE.claude_sessions.ACL.sql
 api.TABLE.clients.ACL.sql
 api.TABLE.doc_comments.ACL.sql
 api.TABLE.doc_versions.ACL.sql
