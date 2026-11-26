@@ -3,7 +3,7 @@
 	import { page } from '$app/state';
 	import { goto, afterNavigate } from '$app/navigation';
 	import { head, sectionTitle } from '#lib/title.svelte.ts';
-	import { API, api, ago, session, signOut, sessionBlocked, watcherSilent, SESSION_PROBLEM } from '#lib/api.svelte.ts';
+	import { API, api, ago, session, signOut, syncAuth, sessionBlocked, watcherSilent, SESSION_PROBLEM } from '#lib/api.svelte.ts';
 	import { every, REFRESH_MS } from '#lib/poll.ts';
 	import { push, pushSupported, pushRefresh, pushEnable, pushDisable } from '#lib/push.svelte.ts';
 	import ClaudeDock from '../../../claude-ui/web/ClaudeDock.svelte';
@@ -128,7 +128,7 @@
 <!-- claude-ui's dock: this agent's chat on every page (launcher -> popup -> pinned side panel);
      /claude is the same chat full page, so the dock steps aside there -->
 {#if session.current}
-	<ClaudeDock pgrst={API} getToken={() => session.current?.token ?? null} isAdmin={() => !!session.current?.is_admin}
+	<ClaudeDock pgrst={API} getToken={() => session.current?.token ?? null} refreshToken={async () => { await syncAuth(); return session.current?.token ?? null; }} isAdmin={() => !!session.current?.is_admin}
 		hidden={!session.current.is_admin || page.url.pathname.startsWith('/claude')} renderers={boardRenderers} />
 {/if}
 
