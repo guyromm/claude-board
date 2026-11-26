@@ -3,6 +3,8 @@
 	// on one screen, each with its description, notes, comments and diff, for one pass. Each review keeps its own Approve /
 	// Request changes; keys act on the review at the top of the screen, and "Approve all" approves every one still open.
 	// URL: /reviews/batch?repo=<repo>&max=500 (no repo: the repos that have 2+ such reviews).
+	// TABS (guy, 11-26): Pending / Approved / Changes requested. A decided review moves from Pending to its tab, so the
+	// next one is first in line; Alt+A / Alt+J act on the first review of the open tab that is on screen.
 	import { page } from '$app/state';
 	import { replaceState } from '$app/navigation';
 	import { tick } from 'svelte';
@@ -44,12 +46,19 @@
 	let decided = $state<Record<number, string>>({});
 	const views: Record<number, View> = {};
 	const stillOpen = $derived(batch.filter((r) => (decided[r.id] ?? 'open') === 'open'));
+	const stOf = (r: Row) => decided[r.id] ?? 'open';
+	const tabs = [{ key: 'open', label: 'Pending' }, { key: 'approved', label: 'Approved' }, { key: 'changes', label: 'Changes requested' }] as const;
+	let tab = $state<string>('open');
+	// merged / closed (an agent acted meanwhile) count as approved / changes for the tabs
+	const tabOf = (st: string) => (st === 'merged' ? 'approved' : st === 'closed' ? 'changes' : st);
+	const inTab = $derived(batch.filter((r) => tabOf(stOf(r)) === tab));
+	const count = (k: string) => batch.filter((r) => tabOf(stOf(r)) === k).length;
 	const isAdmin = $derived(!!session.current?.is_admin);
 
 	// the review at the top of the screen: the last section whose top has passed the sticky bar
 	function current(): number | null {
-		let cur: number | null = batch[0]?.id ?? null;
-		for (const r of batch) {
+		let cur: number | null = inTab[0]?.id ?? null;
+		for (const r of inTab) {
 			const el = document.getElementById(`rv${r.id}`);
 			if (el && el.getBoundingClientRect().top <= 140) cur = r.id;
 		}
@@ -60,10 +69,11 @@
 		await tick();
 		document.getElementById(`rv${id}`)?.scrollIntoView({ block: 'start' });
 	}
-	const nextOpen = (after: number) => stillOpen.find((r) => r.id > after)?.id ?? stillOpen.find((r) => r.id !== after)?.id;
+	// a decided review leaves Pending; the next one in line moves up to where it was
 	async function decideCurrent(d: 'approve' | 'changes') {
 		const id = current(); if (id === null) return;
-		if (await views[id]?.decide(d)) jump(nextOpen(id));
+		const below = inTab.find((r) => r.id > id)?.id;
+		if (await views[id]?.decide(d) && tab === 'open') jump(below ?? inTab[inTab.length - 1]?.id);
 	}
 	let all = $state<{ done: number; n: number; failed: number[] } | null>(null);
 	async function approveAll() {
@@ -80,15 +90,15 @@
 	// then on to the next open one; Alt+N / Alt+P next / previous review
 	$effect(() => {
 		const onKey = (e: KeyboardEvent) => {
-			if (!e.altKey || e.ctrlKey || e.metaKey || !repo || !batch.length) return;
+			if (!e.altKey || e.ctrlKey || e.metaKey || !repo || !inTab.length) return;
 			const k = e.code.startsWith('Key') ? e.code.slice(3).toLowerCase() : '';
 			if (!['a', 'j', 'n', 'p'].includes(k)) return;
 			e.preventDefault();
 			if (k === 'a' && isAdmin) decideCurrent('approve');
 			else if (k === 'j' && isAdmin) decideCurrent('changes');
 			else {
-				const id = current(); const i = batch.findIndex((r) => r.id === id);
-				jump(batch[Math.max(0, Math.min(batch.length - 1, i + (k === 'n' ? 1 : -1)))]?.id);
+				const id = current(); const i = inTab.findIndex((r) => r.id === id);
+				jump(inTab[Math.max(0, Math.min(inTab.length - 1, i + (k === 'n' ? 1 : -1)))]?.id);
 			}
 		};
 		window.addEventListener('keydown', onKey, true);
@@ -128,19 +138,25 @@
 		<span class="mono"><b>{repo}</b></span>
 		<span class="small">{batch.length} review{batch.length === 1 ? '' : 's'} · {stillOpen.length} still open ·
 			<span class="plus">+{batch.reduce((s, r) => s + r.adds, 0)}</span> <span class="minus">−{batch.reduce((s, r) => s + r.dels, 0)}</span></span>
+		<nav class="tabs" role="tablist">
+			{#each tabs as t}
+				<button role="tab" aria-selected={tab === t.key} class:on={tab === t.key} onclick={() => { tab = t.key; window.scrollTo({ top: 0 }); }}>{t.label} ({count(t.key)})</button>
+			{/each}
+		</nav>
 		<nav class="chips">
-			{#each batch as r (r.id)}
+			{#each inTab as r (r.id)}
 				<button class="chip s-{decided[r.id] ?? 'open'}" title="{r.agent}: {r.title} (+{r.adds} −{r.dels})" onclick={() => jump(r.id)}>!{r.id}</button>
 			{/each}
 		</nav>
-		{#if isAdmin && stillOpen.length}
+		{#if isAdmin && stillOpen.length && tab === 'open'}
 			<button class="ok" onclick={approveAll} disabled={!!all && all.done + all.failed.length < all.n}>✓ Approve all {stillOpen.length}</button>
 		{/if}
 		{#if all}<span class="small">{all.done} of {all.n} approved{#if all.failed.length} · failed: {all.failed.map((x) => `!${x}`).join(', ')}{/if}</span>{/if}
-		<span class="muted small keys">Alt+A approve · Alt+J request changes (the review at the top, then the next) · Alt+N / Alt+P next / previous</span>
+		<span class="muted small keys">Alt+A approve · Alt+J request changes (the review at the top; in Pending it moves to its tab and the next comes up) · Alt+N / Alt+P next / previous</span>
 	</div>
 	{#if loaded && !batch.length}<p class="muted">No open reviews of {repo} under {max} lines.</p>{/if}
-	{#each batch as r (r.id)}
+	{#if loaded && batch.length && !inTab.length}<p class="muted">{tab === 'open' ? 'Nothing pending: all reviewed.' : 'None here yet.'}</p>{/if}
+	{#each inTab as r (r.id)}
 		<article class="rv" id="rv{r.id}">
 			<div class="rvhead small"><span class="mono">!{r.id}</span> · {r.agent} · <span class="badge s-{decided[r.id] ?? 'open'}">{label[decided[r.id] ?? 'open'] ?? decided[r.id]}</span></div>
 			<ReviewView id={r.id} group bind:this={views[r.id]} ondecided={(id, s) => (decided = { ...decided, [id]: s })} />
@@ -156,6 +172,10 @@
 	.groups { line-height: 1.8; font-size: 0.9rem; }
 	.sticky { position: sticky; top: 0; z-index: 5; display: flex; flex-wrap: wrap; gap: 0.4rem 0.9rem; align-items: center;
 		padding: 0.45rem 0.7rem; background: var(--bg, #fff); }
+	.tabs { display: inline-flex; }
+	.tabs button { font-size: 0.8rem; padding: 0.2rem 0.65rem; border-radius: 0; }
+	.tabs button:first-child { border-radius: 6px 0 0 6px; } .tabs button:last-child { border-radius: 0 6px 6px 0; }
+	.tabs button.on { font-weight: 700; background: color-mix(in srgb, #0969da 14%, transparent); }
 	.chips { display: flex; flex-wrap: wrap; gap: 0.25rem; }
 	.chip { font-size: 0.72rem; padding: 0.05rem 0.45rem; border-radius: 999px; border: 1px solid var(--line); font-family: var(--mono); }
 	.keys { flex-basis: 100%; }
