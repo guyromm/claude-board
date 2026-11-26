@@ -69,6 +69,12 @@
 		});
 	});
 	const label: Record<string, string> = { open: 'to review', approved: 'approved', changes: 'changes', merged: 'merged', closed: 'closed' };
+	// batch review (guy, 11-26): repos with 2+ open reviews under 500 changed lines, one screen each at /reviews/batch
+	const batches = $derived.by(() => {
+		const m = new Map<string, R[]>();
+		for (const r of rows) if (r.status === 'open' && r.adds + r.dels < 500) m.set(r.repo, [...(m.get(r.repo) ?? []), r]);
+		return [...m.entries()].filter(([, rs]) => rs.length > 1).sort((x, y) => y[1].length - x[1].length);
+	});
 	const totals = $derived({ n: shown.length, files: shown.reduce((s, r) => s + r.files, 0), adds: shown.reduce((s, r) => s + r.adds, 0),
 		dels: shown.reduce((s, r) => s + r.dels, 0) });
 </script>
@@ -82,6 +88,11 @@
 	<span class="muted small">{totals.n} review{totals.n === 1 ? '' : 's'} · {totals.files} files · <span class="plus">+{totals.adds}</span> <span class="minus">−{totals.dels}</span></span>
 </div>
 {#if error}<p class="error">{error}</p>{/if}
+{#if batches.length}
+	<p class="batches small">Review together (open, under 500 lines):
+		{#each batches as [name, rs], i}{i ? ' · ' : ' '}<a href="/reviews/batch?repo={encodeURIComponent(name)}"><span class="mono">{name}</span> ({rs.length})</a>{/each}
+		· <a href="/reviews/batch">all repos</a></p>
+{/if}
 <div class="wrap panel">
 	<table>
 		<thead>
@@ -123,6 +134,7 @@
 
 <style>
 	.small { font-size: 0.8rem; }
+	.batches { margin: 0.2rem 0 0.6rem; }
 	.bar { display: flex; flex-wrap: wrap; gap: 0.6rem 1rem; align-items: center; margin: 0.6rem 0; }
 	.bar input[type='search'] { flex: 1 1 16rem; max-width: 28rem; }
 	.wrap { overflow-x: auto; padding: 0; }
