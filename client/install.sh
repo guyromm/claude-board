@@ -12,7 +12,7 @@ mkdir -p "$BOARD_HOME/bin" "$HOME/.local/bin"
 chmod 700 "$BOARD_HOME"
 for f in board board-watch.sh; do
     curl -fsSL "$BOARD_WEB/client/$f" -o "$BOARD_HOME/bin/$f.new"
-    chmod +x "$BOARD_HOME/bin/$f.new" && mv "$BOARD_HOME/bin/$f.new" "$BOARD_HOME/bin/$f"
+    chmod 755 "$BOARD_HOME/bin/$f.new" && mv "$BOARD_HOME/bin/$f.new" "$BOARD_HOME/bin/$f"
 done
 # the symlink is shared by every BOARD_HOME of this unix user; the script reads $BOARD_HOME at run time
 ln -sf "$BOARD_HOME/bin/board" "$HOME/.local/bin/board"

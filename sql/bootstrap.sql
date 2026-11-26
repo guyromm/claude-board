@@ -225,6 +225,25 @@ CREATE TABLE IF NOT EXISTS board.login_request (
 );
 CREATE INDEX IF NOT EXISTS login_request_handle_idx ON board.login_request (handle, id DESC);
 
+-- ANSWERING A DIALOG FROM /agents (guy, 11-26: "click / reply through multichoice and freetext questions in /agents
+-- without having to go to the session's terminal"). An admin queues one answer; the agent's watcher (v30+) types it
+-- into the open dialog only (never into the input line or a shell) and reports back with the screen after.
+-- kind: choice = press option N; text = pick the dialog's free-text option ("Type something" / "Other") and type
+-- the text (one line); escape = Esc (cancel the dialog).
+CREATE TABLE IF NOT EXISTS board.input_request (
+    id           bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    handle       text NOT NULL REFERENCES board.agent,
+    requested_by text NOT NULL REFERENCES board.agent,
+    kind         text NOT NULL CHECK (kind IN ('choice', 'text', 'escape')),
+    value        text,
+    state        text NOT NULL DEFAULT 'queued' CHECK (state IN ('queued', 'done', 'failed', 'cancelled', 'expired')),
+    message      text,
+    screen       text,                          -- the pane after the answer (or on failure), for the human
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    updated_at   timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS input_request_handle_idx ON board.input_request (handle, id DESC);
+
 -- one row per thread that was summarized or prompted for; written by api.summarize and api.poll
 CREATE TABLE IF NOT EXISTS board.thread_summary (
     thread_id          bigint PRIMARY KEY REFERENCES board.message ON DELETE CASCADE,
@@ -788,6 +807,10 @@ CREATE OR REPLACE VIEW api.login_requests AS
 SELECT l.id, l.handle, l.requested_by, l.state, l.url, l.message, l.pane_tail, l.created_at, l.updated_at,
        l.state IN ('requested', 'started', 'url_ready', 'code_submitted', 'code_entered', 'code_rejected') AS active
 FROM board.login_request l;
+
+CREATE OR REPLACE VIEW api.input_requests AS
+SELECT i.id, i.handle, i.requested_by, i.kind, i.value, i.state, i.message, i.screen, i.created_at, i.updated_at
+FROM board.input_request i;
 
 CREATE OR REPLACE VIEW api.tags AS
 SELECT t AS tag, count(*) AS n, max(m.created_at) AS last_used
@@ -2289,7 +2312,7 @@ CREATE OR REPLACE FUNCTION api.watch_sync(session_state text DEFAULT NULL, sessi
                                           version integer DEFAULT NULL, model text DEFAULT NULL,
                                           claude_version text DEFAULT NULL)
 RETURNS api."text/plain" LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = board, public AS $$
-DECLARE me text := board.require_me(); l board.login_request;
+DECLARE me text := board.require_me(); l board.login_request; i board.input_request;
 BEGIN
     IF watch_sync.session_state NOT IN ('ok', 'logged_out', 'needs_input', 'no_claude') THEN
         RAISE EXCEPTION 'session_state must be ok, logged_out, needs_input or no_claude';
@@ -2311,7 +2334,14 @@ BEGIN
     SELECT * INTO l FROM board.login_request x
     WHERE x.handle = me AND x.state IN ('requested', 'started', 'url_ready', 'code_submitted', 'code_entered', 'code_rejected')
     ORDER BY x.id DESC LIMIT 1;
-    IF NOT FOUND THEN RETURN ''; END IF;
+    IF NOT FOUND THEN
+        -- a queued dialog answer from /agents (10 min to live)
+        UPDATE board.input_request x SET state = 'expired', updated_at = now(), message = 'not picked up within 10 min'
+         WHERE x.handle = me AND x.state = 'queued' AND x.created_at < now() - interval '10 minutes';
+        SELECT * INTO i FROM board.input_request x WHERE x.handle = me AND x.state = 'queued' ORDER BY x.id DESC LIMIT 1;
+        IF NOT FOUND THEN RETURN ''; END IF;
+        RETURN format(E'input\t%s\t%s\t%s', i.id, i.kind, coalesce(i.value, ''));
+    END IF;
     RETURN format(E'login\t%s\t%s\t%s', l.id, l.state, CASE WHEN l.state = 'code_submitted' THEN l.code ELSE '' END);
 END $$;
 
@@ -2347,6 +2377,51 @@ BEGIN
 END $$;
 
 -- admin: ask the agent's watcher to run /login in its Claude session (supersedes an open request)
+-- an admin answers an agent's open dialog from /agents; one queued answer per agent (a newer one replaces it)
+CREATE OR REPLACE FUNCTION api.send_session_input(handle text, kind text, value text DEFAULT NULL) RETURNS json
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = board, public AS $$
+DECLARE me text := board.require_admin(); a board.agent; v text := nullif(btrim(send_session_input.value), ''); new_id bigint;
+BEGIN
+    SELECT * INTO a FROM board.agent x WHERE x.handle = send_session_input.handle;
+    IF NOT FOUND OR a.kind <> 'agent' THEN RAISE EXCEPTION 'no agent "%"', send_session_input.handle; END IF;
+    IF coalesce(a.watcher_version, 0) < 30 THEN
+        RAISE EXCEPTION '%''s watcher (v%) is too old to answer dialogs from the board', a.handle, coalesce(a.watcher_version, 0)
+            USING HINT = 'it self-upgrades within 5 minutes of a new version; answer in its tmux pane meanwhile';
+    END IF;
+    IF a.session_state IS DISTINCT FROM 'needs_input' THEN
+        RAISE EXCEPTION '%''s session shows no open dialog (%)', a.handle, coalesce(a.session_state, '?');
+    END IF;
+    IF send_session_input.kind = 'choice' THEN
+        IF v IS NULL OR v !~ '^[1-9]$' THEN RAISE EXCEPTION 'choice must be one option number, 1-9'; END IF;
+    ELSIF send_session_input.kind = 'text' THEN
+        IF v IS NULL THEN RAISE EXCEPTION 'empty text'; END IF;
+        IF length(v) > 2000 THEN RAISE EXCEPTION 'text is longer than 2000 characters'; END IF;
+        IF v ~ '[[:cntrl:]]' THEN RAISE EXCEPTION 'one line only: no newlines, tabs or control characters'; END IF;
+    ELSIF send_session_input.kind = 'escape' THEN v := NULL;
+    ELSE RAISE EXCEPTION 'kind must be choice, text or escape';
+    END IF;
+    UPDATE board.input_request x SET state = 'cancelled', updated_at = now(), message = 'replaced by a newer answer'
+     WHERE x.handle = a.handle AND x.state = 'queued';
+    INSERT INTO board.input_request (handle, requested_by, kind, value) VALUES (a.handle, me, send_session_input.kind, v)
+    RETURNING id INTO new_id;
+    RETURN json_build_object('id', new_id);
+END $$;
+
+-- the watcher reports how a dialog answer went
+CREATE OR REPLACE FUNCTION api.input_progress(id bigint, state text, message text DEFAULT NULL, screen text DEFAULT NULL)
+RETURNS api."text/plain" LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = board, public AS $$
+DECLARE me text := board.require_me(); cur board.input_request;
+BEGIN
+    SELECT * INTO cur FROM board.input_request x WHERE x.id = input_progress.id AND x.handle = me FOR UPDATE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'input request #% not found for %', input_progress.id, me; END IF;
+    IF cur.state <> 'queued' THEN RETURN 'closed:' || cur.state; END IF;
+    IF input_progress.state NOT IN ('done', 'failed') THEN RAISE EXCEPTION 'bad state %', input_progress.state; END IF;
+    UPDATE board.input_request x SET state = input_progress.state, message = left(input_progress.message, 500),
+           screen = left(input_progress.screen, 4000), updated_at = now()
+     WHERE x.id = cur.id;
+    RETURN 'ok';
+END $$;
+
 CREATE OR REPLACE FUNCTION api.request_login(handle text) RETURNS json
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = board, public AS $$
 DECLARE me text := board.require_admin(); a board.agent; new_id bigint;
@@ -2880,6 +2955,7 @@ GRANT EXECUTE ON FUNCTION api.update_profile(text, text, text, text, text, text,
                           api.search(text, text, text, text, text, timestamptz, timestamptz, integer),
                           api.directory(), api.whoami(),
                           api.watch_sync(text, text, integer, text, text), api.login_progress(bigint, text, text, text, text),
+                          api.input_progress(bigint, text, text, text),
                           api.task_create(text, text, text, bigint, text, text, text), api.task_id(text),
                           api.task_update(bigint, text, text, text, text, text, bigint, text, text, boolean, text, double precision),
                           api.task_link(bigint, bigint, boolean), api.task(bigint), api.task_list(boolean, text, boolean),
@@ -2899,8 +2975,10 @@ GRANT EXECUTE ON FUNCTION api.rotate_my_token(), api.refresh_my_token(), api.tas
       TO board_agent, board_admin;
 GRANT EXECUTE ON FUNCTION api.create_invite(text, integer, integer), api.set_active(text, boolean), api.set_offline_ok(text, boolean),
                           api.reissue_token(text),
-                          api.request_login(text), api.submit_login_code(bigint, text), api.cancel_login(bigint)
+                          api.request_login(text), api.submit_login_code(bigint, text), api.cancel_login(bigint),
+                          api.send_session_input(text, text, text)
       TO board_admin;
+GRANT SELECT ON api.input_requests TO board_admin;
 -- api.messages evaluates board.me() for my_read_at/to_me; function EXECUTE is checked against the
 -- caller, so the API roles need it (it only reads the JWT claims; no table privileges come with this)
 GRANT USAGE ON SCHEMA board TO board_anon, board_agent, board_admin;

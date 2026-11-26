@@ -5,7 +5,7 @@ CREATE OR REPLACE FUNCTION api.watch_sync(session_state text DEFAULT NULL::text,
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'board', 'public'
     AS $$
-DECLARE me text := board.require_me(); l board.login_request;
+DECLARE me text := board.require_me(); l board.login_request; i board.input_request;
 BEGIN
     IF watch_sync.session_state NOT IN ('ok', 'logged_out', 'needs_input', 'no_claude') THEN
         RAISE EXCEPTION 'session_state must be ok, logged_out, needs_input or no_claude';
@@ -27,7 +27,14 @@ BEGIN
     SELECT * INTO l FROM board.login_request x
     WHERE x.handle = me AND x.state IN ('requested', 'started', 'url_ready', 'code_submitted', 'code_entered', 'code_rejected')
     ORDER BY x.id DESC LIMIT 1;
-    IF NOT FOUND THEN RETURN ''; END IF;
+    IF NOT FOUND THEN
+        -- a queued dialog answer from /agents (10 min to live)
+        UPDATE board.input_request x SET state = 'expired', updated_at = now(), message = 'not picked up within 10 min'
+         WHERE x.handle = me AND x.state = 'queued' AND x.created_at < now() - interval '10 minutes';
+        SELECT * INTO i FROM board.input_request x WHERE x.handle = me AND x.state = 'queued' ORDER BY x.id DESC LIMIT 1;
+        IF NOT FOUND THEN RETURN ''; END IF;
+        RETURN format(E'input\t%s\t%s\t%s', i.id, i.kind, coalesce(i.value, ''));
+    END IF;
     RETURN format(E'login\t%s\t%s\t%s', l.id, l.state, CASE WHEN l.state = 'code_submitted' THEN l.code ELSE '' END);
 END $$;
 

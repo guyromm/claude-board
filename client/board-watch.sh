@@ -18,12 +18,16 @@
 # and, when the board has a newer one, installs the new board + board-watch.sh and exits, so its restart
 # loop (board watch-start, or the project's tmux.sh worker) starts the new version. Bump WATCH_VERSION
 # here to push a change to every agent.
-WATCH_VERSION=28  # v28: a pinned target (W.P, %id) that lost Claude falls back to the only Claude pane in its session or tmux server (#4715); v27: refreshes its board token daily (7-day tokens, api.refresh_my_token, #308/8); v26: /agents login accepts Claude Code's short sign-in link (claude.ai/oauth/authorize?z-...); v25: answers the workspace trust prompt with "Yes, I trust this folder"; menu picker searches down and up
+WATCH_VERSION=30  # v30: answers an open dialog from /agents (guy 11-26): option N, free text via the "Type something" option, or Esc; v29: no group/other-writable files: umask 022, upgrades chmod 755, and on start it takes g/o write off its own files (allocator 11-26, #4922); v28: a pinned target (W.P, %id) that lost Claude falls back to the only Claude pane in its session or tmux server (#4715); v27: refreshes its board token daily (7-day tokens, api.refresh_my_token, #308/8); v26: /agents login accepts Claude Code's short sign-in link (claude.ai/oauth/authorize?z-...); v25: answers the workspace trust prompt with "Yes, I trust this folder"; menu picker searches down and up
 # v24: answers "Try the new fullscreen renderer?" with "Yes, try it"
 # v23: types /restart when Claude Code shows "Update installed · /restart to apply" and the session is idle (Remote Control: off for the restart, back on after)
 # v22: a draft left in the input line holds delivery at most 10 min, then it is set aside and typed back
 # v21: board review submit --base EMPTY / unborn base (first commits)
 BOARD_HOME="${BOARD_HOME:-$HOME/.board}"
+# v29 (allocator 11-26): the tmux server's umask (often 002) made the upgraded scripts and state files group-writable,
+# a self-inspection finding in every home. Own mask, and fix what earlier versions left behind.
+umask 022
+chmod go-w "$BOARD_HOME/bin/board" "$BOARD_HOME/bin/board-watch.sh" "$BOARD_HOME"/*.state 2>/dev/null || true
 source "$BOARD_HOME/config" || { echo "no $BOARD_HOME/config"; exit 1; }
 BOARD_API="${BOARD_API:-@BOARD_API@}"
 BOARD_WEB="${BOARD_WEB:-@BOARD_WEB@}"
@@ -343,6 +347,42 @@ extract_url() {
          u != "" { s = $0; sub(/^[ \t│|]+/, "", s); sub(/[ \t│|]+$/, "", s); if (s ~ /^[A-Za-z0-9%._~:\/?#\[\]@!$&'"'"'()*+,;=-]+$/) { u = u s } else { print u; u = ""; exit } }
          END { if (u != "") print u }'
 }
+# ---------------------------------------------------------------- dialog answers from /agents (v30)
+# guy 11-26: answer an agent's multiple-choice or free-text dialog from the board, not the terminal. The board hands
+# out one queued answer at a time (watch_sync: "input<TAB>id<TAB>kind<TAB>value"). It is typed ONLY into an open
+# dialog (dialog_open): never into the input line or a shell. choice N: the option "N." must be on screen, then the
+# digit is pressed. text: the dialog's free-text option ("Type something" / "Other") is picked by its number, then the
+# line is typed and Enter. escape: Esc. The screen after goes back to the board, so the human sees what happened.
+input_report() {  # ID STATE MESSAGE
+    rpc input_progress --data-urlencode "id=$1" --data-urlencode "state=$2" --data-urlencode "message=$3" \
+        --data-urlencode "screen=$(tail_screen 30)" || log "input #$1: report failed ($RPC_CODE): $RPC_OUT"
+    log "input #$1: $2 -- $3"
+}
+input_step() {  # ID KIND VALUE
+    local id="$1" kind="$2" val="$3" n
+    if ! pane_ok; then input_report "$id" failed "the Claude pane $T does not exist"; return; fi
+    in_mode && tmux send-keys -t "$T" -X cancel
+    if ! dialog_open; then input_report "$id" failed "no dialog is open in the session any more (answered already?)"; return; fi
+    case "$kind" in
+        choice)
+            [[ "$val" =~ ^[1-9]$ ]] || { input_report "$id" failed "bad option '$val'"; return; }
+            if ! tail_screen 30 | grep -a -q -E "(^|[[:space:]❯])$val\.[[:space:]]"; then
+                input_report "$id" failed "option $val is not on the screen"; return
+            fi
+            tmux send-keys -t "$T" -l -- "$val" ;;
+        text)
+            n=$(tail_screen 30 | grep -a -o -E '([1-9])\.[[:space:]]+(Type something|Other)' | head -n 1 | cut -c1)
+            if [ -z "$n" ]; then input_report "$id" failed "this dialog has no free-text option (Type something / Other)"; return; fi
+            tmux send-keys -t "$T" -l -- "$n"; sleep 0.8
+            tmux send-keys -t "$T" -l -- "$val"; sleep 0.5
+            tmux send-keys -t "$T" Enter ;;
+        escape) tmux send-keys -t "$T" Escape ;;
+        *) input_report "$id" failed "unknown kind '$kind'"; return ;;
+    esac
+    sleep 2
+    input_report "$id" done "$kind ${val:+'$val' }sent"
+}
+
 progress() {  # STATE MESSAGE [URL] [PANE_TAIL]
     local args=(--data-urlencode "id=$L_ID" --data-urlencode "state=$1" --data-urlencode "message=$2") r
     [ -n "$3" ] && args+=(--data-urlencode "url=$3")
@@ -467,7 +507,7 @@ check_upgrade() {
             log "upgrade to v$v failed (download/syntax of $f); staying on v$WATCH_VERSION"; rm -f "$bin"/*.new; return 0
         fi
     done
-    for f in board board-watch.sh; do chmod +x "$bin/$f.new" && mv "$bin/$f.new" "$bin/$f"; done
+    for f in board board-watch.sh; do chmod 755 "$bin/$f.new" && mv "$bin/$f.new" "$bin/$f"; done
     log "upgraded v$WATCH_VERSION -> v$v; exiting so the restart loop starts the new version"
     exit 0
 }
@@ -699,6 +739,10 @@ while true; do
         login_step "$lid" "$lstate" "$lcode"
     elif [ -n "$L_ID" ] && [ "$RPC_CODE" = 200 ]; then
         log "login #$L_ID is no longer active on the board (cancelled or expired)"; login_abort
+    fi
+    if [[ "$task" == input$'\t'* ]] && [ -z "$L_ID" ]; then
+        IFS=$'\t' read -r _ iid ikind ival <<<"$task"
+        input_step "$iid" "$ikind" "$ival"
     fi
 
     answer_known_dialogs
