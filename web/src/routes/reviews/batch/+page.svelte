@@ -32,7 +32,7 @@
 		const next = u.toString() ? `?${u}` : '';
 		if (next !== location.search) replaceState(`/reviews/batch${next}`, {});
 	});
-	$effect(() => { head.title = repo ? `Batch review: ${repo}` : 'Batch review'; });
+	$effect(() => { head.title = repo ? `Batch review: ${repo === '*' ? 'all repos' : repo}` : 'Batch review'; });
 
 	const small = $derived(rows.filter((r) => r.adds + r.dels < max));
 	const repos = $derived.by(() => {
@@ -44,7 +44,12 @@
 			.sort((a, b) => b.rs.length - a.rs.length || a.name.localeCompare(b.name));
 	});
 	// the batch is fixed once loaded: a review stays on screen after it is decided (its badge changes), so nothing jumps
-	const batch = $derived(small.filter((r) => r.repo_name === repo));
+	// repo '*' = every repo (guy 11-26: most repos have one open review at a time, so per-repo batches stay empty);
+	// ordered by repo, then id, with the repo shown on each review
+	const ALL = '*';
+	const batch = $derived(repo === ALL ? [...small].sort((a, b) => a.repo_name.localeCompare(b.repo_name) || a.id - b.id)
+		: small.filter((r) => r.repo_name === repo));
+	const repoLabel = $derived(repo === ALL ? 'all repos' : repo);
 	let decided = $state<Record<number, string>>({});
 	const views: Record<number, View> = {};
 	const stillOpen = $derived(batch.filter((r) => (decided[r.id] ?? 'open') === 'open'));
@@ -80,7 +85,7 @@
 	let all = $state<{ done: number; n: number; failed: number[] } | null>(null);
 	async function approveAll() {
 		const ids = stillOpen.map((r) => r.id);
-		if (!ids.length || !confirm(`Approve all ${ids.length} open reviews of ${repo}? Each agent gets its approval and merges.`)) return;
+		if (!ids.length || !confirm(`Approve all ${ids.length} open reviews of ${repoLabel}? Each agent gets its approval and merges.`)) return;
 		all = { done: 0, n: ids.length, failed: [] };
 		for (const id of ids) {
 			const ok = await views[id]?.decide('approve');
@@ -115,8 +120,9 @@
 	<label class="small">repo
 		<select bind:value={repo}>
 			<option value="">choose…</option>
+			<option value="*">all repos ({small.length})</option>
 			{#each repos as g}<option value={g.name}>{g.name} ({g.rs.length})</option>{/each}
-			{#if repo && !repos.some((g) => g.name === repo)}<option value={repo}>{repo} (0)</option>{/if}
+			{#if repo && repo !== '*' && !repos.some((g) => g.name === repo)}<option value={repo}>{repo} (0)</option>{/if}
 		</select>
 	</label>
 	<label class="small">under <input type="number" min="1" step="50" bind:value={max} class="num" /> lines (+ and −)</label>
@@ -127,6 +133,7 @@
 	{#if loaded}
 		<p class="muted small">Open reviews under {max} changed lines, by repo. Pick one to read them all on one screen.</p>
 		<ul class="groups">
+			{#if small.length > 1}<li><a href="/reviews/batch?repo=*{max !== 500 ? `&max=${max}` : ''}" onclick={(e) => { e.preventDefault(); repo = '*'; }}><b>all repos</b></a> · {small.length} reviews</li>{/if}
 			{#each repos as g}
 				<li><a href="/reviews/batch?repo={encodeURIComponent(g.name)}{max !== 500 ? `&max=${max}` : ''}" onclick={(e) => { e.preventDefault(); repo = g.name; }}>
 					<span class="mono">{g.name}</span></a> · {g.rs.length} review{g.rs.length === 1 ? '' : 's'} ·
@@ -137,7 +144,7 @@
 	{/if}
 {:else}
 	<div class="sticky panel">
-		<span class="mono"><b>{repo}</b></span>
+		<span class="mono"><b>{repoLabel}</b></span>
 		<span class="small">{batch.length} review{batch.length === 1 ? '' : 's'} · {stillOpen.length} still open ·
 			<span class="plus">+{batch.reduce((s, r) => s + r.adds, 0)}</span> <span class="minus">−{batch.reduce((s, r) => s + r.dels, 0)}</span></span>
 		<nav class="tabs" role="tablist">
@@ -156,11 +163,11 @@
 		{#if all}<span class="small">{all.done} of {all.n} approved{#if all.failed.length} · failed: {all.failed.map((x) => `!${x}`).join(', ')}{/if}</span>{/if}
 		<span class="muted small keys">Alt+A approve · Alt+J request changes (the review at the top; in Pending it moves to its tab and the next comes up) · Alt+N / Alt+P next / previous</span>
 	</div>
-	{#if loaded && !batch.length}<p class="muted">No open reviews of {repo} under {max} lines.</p>{/if}
+	{#if loaded && !batch.length}<p class="muted">No open reviews of {repoLabel} under {max} lines.</p>{/if}
 	{#if loaded && batch.length && !inTab.length}<p class="muted">{tab === 'open' ? 'Nothing pending: all reviewed.' : 'None here yet.'}</p>{/if}
 	{#each inTab as r (r.id)}
 		<article class="rv" id="rv{r.id}">
-			<div class="rvhead small"><span class="mono">!{r.id}</span> · {r.agent} · <span class="badge s-{decided[r.id] ?? 'open'}">{label[decided[r.id] ?? 'open'] ?? decided[r.id]}</span></div>
+			<div class="rvhead small"><span class="mono">!{r.id}</span> · {r.agent}{#if repo === '*'} · <span class="mono">{r.repo_name}</span>{/if} · <span class="badge s-{decided[r.id] ?? 'open'}">{label[decided[r.id] ?? 'open'] ?? decided[r.id]}</span></div>
 			<ReviewView id={r.id} group bind:this={views[r.id]} ondecided={(id, s) => (decided = { ...decided, [id]: s })} />
 		</article>
 	{/each}
