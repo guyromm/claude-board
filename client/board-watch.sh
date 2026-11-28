@@ -18,7 +18,7 @@
 # and, when the board has a newer one, installs the new board + board-watch.sh and exits, so its restart
 # loop (board watch-start, or the project's tmux.sh worker) starts the new version. Bump WATCH_VERSION
 # here to push a change to every agent.
-WATCH_VERSION=30  # v30: answers an open dialog from /agents (guy 11-26): option N, free text via the "Type something" option, or Esc; v29: no group/other-writable files: umask 022, upgrades chmod 755, and on start it takes g/o write off its own files (allocator 11-26, #4922); v28: a pinned target (W.P, %id) that lost Claude falls back to the only Claude pane in its session or tmux server (#4715); v27: refreshes its board token daily (7-day tokens, api.refresh_my_token, #308/8); v26: /agents login accepts Claude Code's short sign-in link (claude.ai/oauth/authorize?z-...); v25: answers the workspace trust prompt with "Yes, I trust this folder"; menu picker searches down and up
+WATCH_VERSION=31  # v31: a notification left typed but unsubmitted in the input line (lost Enter) is submitted, and every delivery checks it went (guy 11-28, roblox #5020); v30: answers an open dialog from /agents (guy 11-26): option N, free text via the "Type something" option, or Esc; v29: no group/other-writable files: umask 022, upgrades chmod 755, and on start it takes g/o write off its own files (allocator 11-26, #4922); v28: a pinned target (W.P, %id) that lost Claude falls back to the only Claude pane in its session or tmux server (#4715); v27: refreshes its board token daily (7-day tokens, api.refresh_my_token, #308/8); v26: /agents login accepts Claude Code's short sign-in link (claude.ai/oauth/authorize?z-...); v25: answers the workspace trust prompt with "Yes, I trust this folder"; menu picker searches down and up
 # v24: answers "Try the new fullscreen renderer?" with "Yes, try it"
 # v23: types /restart when Claude Code shows "Update installed · /restart to apply" and the session is idle (Remote Control: off for the restart, back on after)
 # v22: a draft left in the input line holds delivery at most 10 min, then it is set aside and typed back
@@ -231,16 +231,45 @@ restore_draft() {
     log "draft typed back into the input line"
     STASH=
 }
+# A notification typed but never submitted (guy 11-28: roblox sat ~42 h with "[board] message #5020 ..." in its
+# input line; the Enter after the text was lost). The input line then holds a non-dim line starting "[board] ".
+unsent_notification() { input_busy && [[ "$INPUT_WHY" == "someone is typing"* ]] && [[ "$(draft_lines | head -n 1)" == '[board] '* ]]; }
+# after typing + Enter: if the text is still in the input line, press Enter again (up to 3 times); 1 = still there
+confirm_submitted() {
+    local i
+    for i in 1 2 3; do
+        sleep 1.5
+        unsent_notification || return 0
+        log "notification still in the input line after Enter; pressing Enter again ($i/3)"
+        tmux send-keys -t "$T" Enter
+    done
+    sleep 1.5; unsent_notification && return 1; return 0
+}
 HELD_SINCE=0 HELD_DRAFT= STASH=
 deliver() {
     local text d
     restore_draft || return 1
-    [ -s "$PENDING" ] || return 0
+    # nothing new to type: still submit an earlier notification left unsent (checked about once a minute)
+    if [ ! -s "$PENDING" ]; then
+        [ $(( $(now) - ${UNSENT_CHECKED:-0} )) -ge 60 ] || return 0
+        UNSENT_CHECKED=$(now)
+        pane_ok && ! in_mode && [ "$SESSION" = ok ] && [ -z "$L_ID" ] && unsent_notification || return 0
+        log "an earlier notification sits unsent in the input line; submitting it: $(draft_lines | head -n 1 | cut -c1-120)"
+        tmux send-keys -t "$T" Enter
+        confirm_submitted || log "still unsent after 3 more Enters: $INPUT_WHY"
+        return 0
+    fi
     if ! pane_ok; then log "target pane $T not found; holding $(wc -l < "$PENDING") notification(s)"; return 1; fi
     # copy-mode would swallow the keystrokes as navigation commands
     if in_mode; then log "target pane in copy-mode; retrying later"; return 1; fi
     # a logged-out session would only answer "Please run /login"; a login dialog must not get typed into
     [ "$SESSION" = ok ] && [ -z "$L_ID" ] || return 1
+    if unsent_notification; then
+        log "an earlier notification sits unsent in the input line; submitting it: $(draft_lines | head -n 1 | cut -c1-120)"
+        tmux send-keys -t "$T" Enter
+        confirm_submitted || log "still unsent after 3 more Enters: $INPUT_WHY"
+        return 1
+    fi
     if input_busy; then
         if [[ "$INPUT_WHY" == "someone is typing"* ]]; then
             d=$(draft_lines)
@@ -262,6 +291,7 @@ deliver() {
     text=$(awk 'NR > 1 { printf "  ||  " } { printf "%s", $0 }' "$PENDING")
     tmux send-keys -t "$T" -l -- "$text" && sleep 0.5 && tmux send-keys -t "$T" Enter \
         && { log "delivered: $text"; : > "$PENDING"; }
+    confirm_submitted || log "WARNING: the notification is still unsent in the input line; the next poll retries"
     [ -n "$STASH" ] && { sleep 1; restore_draft; }
     return 0
 }

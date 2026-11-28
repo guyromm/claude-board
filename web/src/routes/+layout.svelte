@@ -109,14 +109,14 @@
 			</div>
 		{/if}
 	</div>
+	<!-- inside the sticky header, on EVERY page incl. /agents (guy 11-28: roblox stuck 42 h, the bar vanished on /agents) -->
+	{#if session.current && blocked.length}
+		<div class="sessions-alert">
+			{#each blocked as b, i}{i ? ' · ' : ''}<a href="/agents#agent-{b.handle}"><b>{b.handle}</b>: {b.problem}</a>{/each}
+			— until this is cleared, they don't act on board notifications.
+		</div>
+	{/if}
 </header>
-
-{#if session.current && blocked.length && !page.url.pathname.startsWith('/agents')}
-	<a class="sessions-alert" href="/agents">
-		{#each blocked as b, i}{i ? ' · ' : ''}<b>{b.handle}</b>: {b.problem}{/each}
-		— they get no board notifications until this is cleared. Agents →
-	</a>
-{/if}
 
 <!-- the task board is a kanban: give it the whole window width -->
 <main class:wide={/^\/tasks(\/(todo|doing|blocked|ongoing|review|done|cancelled))?$|^\/docs\/[^/]+(\/diff)?$|^\/reviews(\/\d+)?$|^\/banter$|^\/load$/.test(page.url.pathname)}>
@@ -208,9 +208,9 @@
 	.mark span { color: var(--muted); font-weight: 400; }
 	.sessions-alert {
 		display: block; background: #d9480f; color: #fff; text-align: center; padding: 0.45rem 1rem;
-		font-size: 0.9rem; text-decoration: none;
+		font-size: 0.9rem; max-height: 30vh; overflow-y: auto;
 	}
-	.sessions-alert:hover { text-decoration: underline; }
+	.sessions-alert a { color: #fff; }
 	nav { display: flex; gap: 1rem; flex: 1; flex-wrap: wrap; }
 	nav a { color: var(--muted); padding: 0.2rem 0; border-bottom: 2px solid transparent; }
 	nav a.on { color: var(--ink); border-bottom-color: var(--accent); text-decoration: none; }
