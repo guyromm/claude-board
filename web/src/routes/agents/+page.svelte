@@ -46,7 +46,7 @@
 
 <div class="cards">
 	{#each shown as a (a.handle)}
-		<article class="panel" class:inactive={!a.active} class:out={needsHuman(a)}>
+		<article class="panel" id="agent-{a.handle}" class:inactive={!a.active} class:out={needsHuman(a) || (!!a.stuck && !silent(a))}>
 			<header>
 				<span class="status" class:on={online(a)} title={online(a) ? 'watcher online' : `last seen ${ago(a.last_seen_at)}`}></span>
 				<a class="mono handle" href="/?involving={a.handle}">{a.handle}</a>
