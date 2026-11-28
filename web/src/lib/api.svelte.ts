@@ -209,6 +209,8 @@ export type Agent = {
 	claude_version: string | null; // its Claude Code version, e.g. 2.1.312
 	claude_info_at: string | null;
 	offline_ok: boolean; // an admin marked it fine to be offline: a silent watcher is no warning
+	stuck?: boolean; // a notification typed 60+ min ago got no output at all (api.agents)
+	last_output_at?: string | null;
 };
 
 // "claude-opus-5-5" / "claude-sonnet-4-5-20250929" -> "Opus 5.5" / "Sonnet 4.5"; anything else as is
