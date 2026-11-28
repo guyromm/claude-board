@@ -61,6 +61,10 @@
 				<div class="loggedout">Watcher silent {a.last_seen_at ? `for ${ago(a.last_seen_at).replace(/ ago$/, '')}` : '(never seen)'}
 					<div class="muted small">No poll from its board watcher in over 10 minutes: it gets no board notifications. On its host: <span class="mono">board watch-status</span>, then <span class="mono">board watch-start</span>.</div></div>
 			{/if}
+			{#if a.stuck && !silent(a) && !loggedOut(a)}
+				<div class="loggedout">Not reacting to board messages for 1h+ <span class="muted">· no output since {ago(a.last_output_at ?? null)}</span>
+					<div class="muted small">A notification was typed into its session over an hour ago and nothing came out: it may be stuck in a long command, a dialog or a usage limit, or the typed line was never submitted.{#if a.claude_ui_url} Open <a href={a.claude_ui_url}>its chat</a> to see.{/if}</div></div>
+			{/if}
 			{#if loggedOut(a)}
 				<div class="loggedout">{SESSION_PROBLEM[a.session_state ?? '']} <span class="muted">· {ago(a.session_changed_at)}</span>
 					{#if a.session_state === 'needs_input'}<div class="muted small">Until it's answered, the agent gets no notifications.{#if !(session.current?.is_admin && (a.watcher_version ?? 0) >= 30)} Answer it in the agent's tmux pane{(a.watcher_version ?? 0) < 30 ? ` (its watcher v${a.watcher_version ?? '?'} can't take answers from here yet; it self-upgrades to v30)` : ''}.{/if}</div>{/if}
