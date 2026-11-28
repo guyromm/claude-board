@@ -18,7 +18,7 @@
 # and, when the board has a newer one, installs the new board + board-watch.sh and exits, so its restart
 # loop (board watch-start, or the project's tmux.sh worker) starts the new version. Bump WATCH_VERSION
 # here to push a change to every agent.
-WATCH_VERSION=31  # v31: a notification left typed but unsubmitted in the input line (lost Enter) is submitted, and every delivery checks it went (guy 11-28, roblox #5020); v30: answers an open dialog from /agents (guy 11-26): option N, free text via the "Type something" option, or Esc; v29: no group/other-writable files: umask 022, upgrades chmod 755, and on start it takes g/o write off its own files (allocator 11-26, #4922); v28: a pinned target (W.P, %id) that lost Claude falls back to the only Claude pane in its session or tmux server (#4715); v27: refreshes its board token daily (7-day tokens, api.refresh_my_token, #308/8); v26: /agents login accepts Claude Code's short sign-in link (claude.ai/oauth/authorize?z-...); v25: answers the workspace trust prompt with "Yes, I trust this folder"; menu picker searches down and up
+WATCH_VERSION=32  # v32: a draft set aside, typed back and found untouched at the next set-aside is a stray: dropped (logged), not typed back again (whatsapp 11-28, '"join' since 11-23); v31: a notification left typed but unsubmitted in the input line (lost Enter) is submitted, and every delivery checks it went (guy 11-28, roblox #5020); v30: answers an open dialog from /agents (guy 11-26): option N, free text via the "Type something" option, or Esc; v29: no group/other-writable files: umask 022, upgrades chmod 755, and on start it takes g/o write off its own files (allocator 11-26, #4922); v28: a pinned target (W.P, %id) that lost Claude falls back to the only Claude pane in its session or tmux server (#4715); v27: refreshes its board token daily (7-day tokens, api.refresh_my_token, #308/8); v26: /agents login accepts Claude Code's short sign-in link (claude.ai/oauth/authorize?z-...); v25: answers the workspace trust prompt with "Yes, I trust this folder"; menu picker searches down and up
 # v24: answers "Try the new fullscreen renderer?" with "Yes, try it"
 # v23: types /restart when Claude Code shows "Update installed · /restart to apply" and the session is idle (Remote Control: off for the restart, back on after)
 # v22: a draft left in the input line holds delivery at most 10 min, then it is set aside and typed back
@@ -229,6 +229,7 @@ restore_draft() {
         tmux send-keys -t "$T" -l -- "$l"
     done <<<"$STASH"
     log "draft typed back into the input line"
+    LAST_RESTORED=$STASH
     STASH=
 }
 # A notification typed but never submitted (guy 11-28: roblox sat ~42 h with "[board] message #5020 ..." in its
@@ -245,7 +246,7 @@ confirm_submitted() {
     done
     sleep 1.5; unsent_notification && return 1; return 0
 }
-HELD_SINCE=0 HELD_DRAFT= STASH=
+HELD_SINCE=0 HELD_DRAFT= STASH= LAST_RESTORED=
 deliver() {
     local text d
     restore_draft || return 1
@@ -280,7 +281,14 @@ deliver() {
         if [[ "$INPUT_WHY" == "someone is typing"* ]] && [ $(( $(now) - HELD_SINCE )) -ge "$DRAFT_GRACE" ]; then
             log "draft unchanged for ${DRAFT_GRACE}s; setting it aside to deliver, then typing it back: $(printf '%s' "$HELD_DRAFT" | awk 'NR > 1 { printf " \\n " } { printf "%s", $0 }')"
             if ! clear_input; then log "could not clear the draft ($INPUT_WHY); still holding"; HELD_SINCE=$(now); return 1; fi
-            STASH=$HELD_DRAFT
+            # the same draft set aside again, untouched since we typed it back: nobody is writing it, it's a stray
+            # (whatsapp 11-23..11-28: a '"join' left by a dialog held every notification 10 min for 5 days). Drop it.
+            if [ -n "$LAST_RESTORED" ] && [ "$HELD_DRAFT" = "$LAST_RESTORED" ]; then
+                log "the same draft came back untouched since it was typed back; dropping it as a stray (text above)"
+                STASH= LAST_RESTORED=
+            else
+                STASH=$HELD_DRAFT
+            fi
         else
             [ $(( $(now) - HELD_SINCE )) -ge 900 ] && { log "still holding after 15 min: $INPUT_WHY"; HELD_SINCE=$(now); }
             return 1
